@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -27,14 +29,19 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/jetstack/cert-manager/pkg/api"
-	"github.com/jetstack/cert-manager/pkg/controller/cainjector"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
+	cmdutil "github.com/cert-manager/cert-manager/cmd/util"
+	"github.com/cert-manager/cert-manager/pkg/api"
+	"github.com/cert-manager/cert-manager/pkg/controller/cainjector"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
+	"github.com/cert-manager/cert-manager/pkg/util/profiling"
 )
 
+// InjectorControllerOptions is a struct having injector controller options values
 type InjectorControllerOptions struct {
 	Namespace               string
 	LeaderElect             bool
@@ -46,36 +53,48 @@ type InjectorControllerOptions struct {
 	StdOut io.Writer
 	StdErr io.Writer
 
+	// EnablePprof determines whether Go profiler should be run.
+	EnablePprof bool
+	// PprofAddr is the address at which Go profiler will be run if enabled.
+	// The profiler should never be exposed on a public address.
+	PprofAddr string
+
 	// logger to be used by this controller
 	log logr.Logger
 }
 
+// AddFlags adds the various flags for injector controller options
 func (o *InjectorControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.Namespace, "namespace", "", ""+
 		"If set, this limits the scope of cainjector to a single namespace. "+
 		"If set, cainjector will not update resources with certificates outside of the "+
 		"configured namespace.")
-	fs.BoolVar(&o.LeaderElect, "leader-elect", true, ""+
+	fs.BoolVar(&o.LeaderElect, "leader-elect", cmdutil.DefaultLeaderElect, ""+
 		"If true, cainjector will perform leader election between instances to ensure no more "+
 		"than one instance of cainjector operates at a time")
-	fs.StringVar(&o.LeaderElectionNamespace, "leader-election-namespace", "", ""+
-		"Namespace used to perform leader election (defaults to controller's namespace). "+
-		"Only used if leader election is enabled")
-	fs.DurationVar(&o.LeaseDuration, "leader-election-lease-duration", 15*time.Second, ""+
+	fs.StringVar(&o.LeaderElectionNamespace, "leader-election-namespace", cmdutil.DefaultLeaderElectionNamespace, ""+
+		"Namespace used to perform leader election. Only used if leader election is enabled")
+	fs.DurationVar(&o.LeaseDuration, "leader-election-lease-duration", cmdutil.DefaultLeaderElectionLeaseDuration, ""+
 		"The duration that non-leader candidates will wait after observing a leadership "+
 		"renewal until attempting to acquire leadership of a led but unrenewed leader "+
 		"slot. This is effectively the maximum duration that a leader can be stopped "+
 		"before it is replaced by another candidate. This is only applicable if leader "+
 		"election is enabled.")
-	fs.DurationVar(&o.RenewDeadline, "leader-election-renew-deadline", 10*time.Second, ""+
+	fs.DurationVar(&o.RenewDeadline, "leader-election-renew-deadline", cmdutil.DefaultLeaderElectionRenewDeadline, ""+
 		"The interval between attempts by the acting master to renew a leadership slot "+
 		"before it stops leading. This must be less than or equal to the lease duration. "+
 		"This is only applicable if leader election is enabled.")
-	fs.DurationVar(&o.RetryPeriod, "leader-election-retry-period", 2*time.Second, ""+
+	fs.DurationVar(&o.RetryPeriod, "leader-election-retry-period", cmdutil.DefaultLeaderElectionRetryPeriod, ""+
 		"The duration the clients should wait between attempting acquisition and renewal "+
 		"of a leadership. This is only applicable if leader election is enabled.")
+
+	fs.BoolVar(&o.EnablePprof, "enable-profiling", cmdutil.DefaultEnableProfiling, "Enable profiling for cainjector")
+	fs.StringVar(&o.PprofAddr, "profiler-address", cmdutil.DefaultProfilerAddr, "Address of the Go profiler (pprof) if enabled. This should never be exposed on a public interface.")
+
+	utilfeature.DefaultMutableFeatureGate.AddFlag(fs)
 }
 
+// NewInjectorControllerOptions returns a new InjectorControllerOptions
 func NewInjectorControllerOptions(out, errOut io.Writer) *InjectorControllerOptions {
 	o := &InjectorControllerOptions{
 		StdOut: out,
@@ -123,6 +142,7 @@ func (o InjectorControllerOptions) RunInjectorController(ctx context.Context) er
 		LeaderElectionNamespace:       o.LeaderElectionNamespace,
 		LeaderElectionID:              "cert-manager-cainjector-leader-election",
 		LeaderElectionReleaseOnCancel: true,
+		LeaderElectionResourceLock:    resourcelock.LeasesResourceLock,
 		LeaseDuration:                 &o.LeaseDuration,
 		RenewDeadline:                 &o.RenewDeadline,
 		RetryPeriod:                   &o.RetryPeriod,
@@ -133,6 +153,39 @@ func (o InjectorControllerOptions) RunInjectorController(ctx context.Context) er
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
+
+	// if a PprofAddr is provided, start the pprof listener
+	if o.EnablePprof {
+		pprofListener, err := net.Listen("tcp", o.PprofAddr)
+		if err != nil {
+			return err
+		}
+
+		profilerMux := http.NewServeMux()
+		// Add pprof endpoints to this mux
+		profiling.Install(profilerMux)
+		o.log.V(logf.InfoLevel).Info("running go profiler on", "address", o.PprofAddr)
+		server := &http.Server{
+			Handler: profilerMux,
+		}
+		g.Go(func() error {
+			<-gctx.Done()
+			// allow a timeout for graceful shutdown
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := server.Shutdown(ctx); err != nil {
+				return err
+			}
+			return nil
+		})
+		g.Go(func() error {
+			if err := server.Serve(pprofListener); err != http.ErrServerClosed {
+				return err
+			}
+			return nil
+		})
+	}
 
 	g.Go(func() (err error) {
 		defer func() {

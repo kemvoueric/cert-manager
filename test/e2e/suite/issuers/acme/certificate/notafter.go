@@ -21,22 +21,22 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/helper/featureset"
-	"github.com/jetstack/cert-manager/test/e2e/framework/helper/validation"
-	"github.com/jetstack/cert-manager/test/e2e/util"
-	e2eutil "github.com/jetstack/cert-manager/test/e2e/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/featureset"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/validation"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var _ = framework.CertManagerDescribe("ACME Certificate (HTTP01 + Not After)", func() {
@@ -52,7 +52,7 @@ var _ = framework.CertManagerDescribe("ACME Certificate (HTTP01 + Not After)", f
 	fixedIngressName := "testingress"
 
 	// ACME Issuer does not return a ca.crt. See:
-	// https://github.com/jetstack/cert-manager/issues/1571
+	// https://github.com/cert-manager/cert-manager/issues/1571
 	unsupportedFeatures := featureset.NewFeatureSet(featureset.SaveCAToSecret)
 	validations := validation.CertificateSetForUnsupportedFeatureSet(unsupportedFeatures)
 
@@ -139,15 +139,15 @@ var _ = framework.CertManagerDescribe("ACME Certificate (HTTP01 + Not After)", f
 		)
 		cert.Namespace = f.Namespace.Name
 
-		_, err := certClient.Create(context.TODO(), cert, metav1.CreateOptions{})
+		cert, err := certClient.Create(context.TODO(), cert, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Waiting for the Certificate to be issued...")
-		_, err = f.Helper().WaitForCertificateReady(f.Namespace.Name, certificateName, time.Minute*5)
+		cert, err = f.Helper().WaitForCertificateReadyAndDoneIssuing(cert, time.Minute*5)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Validating the issued Certificate...")
-		err = f.Helper().ValidateCertificate(f.Namespace.Name, certificateName, validations...)
+		err = f.Helper().ValidateCertificate(cert, validations...)
 		Expect(err).NotTo(HaveOccurred())
 
 		sec, err := f.Helper().WaitForSecretCertificateData(f.Namespace.Name, certificateSecretName, time.Minute*5)

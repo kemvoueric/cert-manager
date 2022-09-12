@@ -25,8 +25,8 @@ import (
 
 	"github.com/Venafi/vcert/v4/pkg/certificate"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 // ErrCustomFieldsType provides a common error structure for an invalid Venafi custom field type
@@ -49,9 +49,7 @@ func (v *Venafi) RequestCertificate(csrPEM []byte, duration time.Duration, custo
 	if err != nil {
 		return "", err
 	}
-	// Send the certificate signing request to Venafi
-	requestID, err := v.vcertClient.RequestCertificate(vreq)
-	return requestID, err
+	return v.vcertClient.RequestCertificate(vreq)
 }
 
 func (v *Venafi) RetrieveCertificate(pickupID string, csrPEM []byte, duration time.Duration, customFields []api.CustomField) ([]byte, error) {
@@ -61,7 +59,7 @@ func (v *Venafi) RetrieveCertificate(pickupID string, csrPEM []byte, duration ti
 	}
 
 	vreq.PickupID = pickupID
-	vreq.Timeout = time.Second * 10
+	vreq.Timeout = time.Second * 60
 
 	// Retrieve the certificate from request
 	pemCollection, err := v.vcertClient.RetrieveCertificate(vreq)

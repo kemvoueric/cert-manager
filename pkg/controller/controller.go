@@ -28,8 +28,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/metrics"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
 )
 
 type runFunc func(context.Context)
@@ -119,6 +119,7 @@ func (c *controller) Run(workers int, stopCh <-chan struct{}) error {
 	}
 
 	for _, f := range c.runDurationFuncs {
+		f := f // capture range variable
 		go wait.Until(func() { f.fn(ctx) }, f.duration, stopCh)
 	}
 
@@ -159,8 +160,12 @@ func (c *controller) worker(ctx context.Context) {
 			if err != nil {
 				if strings.Contains(err.Error(), genericregistry.OptimisticLockErrorMsg) {
 					log.Info("re-queuing item due to optimistic locking on resource", "error", err.Error())
+					// These errors are not counted towards the controllerSyncErrorCount metric on purpose
+					// as they will go way with
+					// https://github.com/cert-manager/cert-manager/blob/master/design/20220118.server-side-apply.md
 				} else {
 					log.Error(err, "re-queuing item due to error processing")
+					c.metrics.IncrementSyncErrorCount(c.name)
 				}
 
 				c.queue.AddRateLimited(obj)

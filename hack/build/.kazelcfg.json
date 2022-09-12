@@ -1,4 +1,5 @@
 {
-  "GoPrefix": "github.com/jetstack/cert-manager",
-  "AddSourcesRules": true
+  "GoPrefix": "github.com/cert-manager/cert-manager",
+  "AddSourcesRules": true,
+  "SkippedPaths": ["_bin"]
 }

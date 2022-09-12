@@ -19,6 +19,7 @@ package apiserver
 import (
 	"testing"
 
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
@@ -35,16 +36,19 @@ func RunBareControlPlane(t *testing.T) (*envtest.Environment, StopFunc) {
 	// Here we start the API server so its address can be given to the webhook on
 	// start. We then restart the API with the CRDs in the webhook.
 	env := &envtest.Environment{
-		AttachControlPlaneOutput: true,
+		AttachControlPlaneOutput: false,
 	}
 
 	if _, err := env.Start(); err != nil {
 		t.Fatalf("failed to start control plane: %v", err)
 	}
 
+	// Ensure we set a User Agent for the API server client.
+	env.Config.UserAgent = rest.DefaultKubernetesUserAgent()
+
 	return env, func() {
 		if err := env.Stop(); err != nil {
-			t.Logf("failed to shut down control plane, not failing test: %v", err)
+			t.Fatalf("failed to shut down control plane: %v", err)
 		}
 	}
 }

@@ -34,16 +34,17 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	"github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests/fake"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	issuerfake "github.com/jetstack/cert-manager/pkg/issuer/fake"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/selfsigned"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/fake"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	issuerfake "github.com/cert-manager/cert-manager/pkg/issuer/fake"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/selfsigned"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var (
@@ -52,6 +53,7 @@ var (
 )
 
 func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgorithm) []byte {
+	t.Helper()
 	asn1Subj, _ := asn1.Marshal(pkix.Name{
 		CommonName: "test",
 	}.ToRDNSequence())
@@ -72,6 +74,7 @@ func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgori
 }
 
 func generateSelfSignedCert(t *testing.T, cr *cmapi.CertificateRequest, key crypto.Signer, notBefore, notAfter time.Time) []byte {
+	t.Helper()
 	template, err := pki.GenerateTemplateFromCertificateRequest(cr)
 	if err != nil {
 		t.Errorf("failed to generate cert template from CSR: %v", err)
@@ -113,6 +116,7 @@ func TestSync(t *testing.T) {
 	}
 
 	csrRSAPEM := generateCSR(t, skRSA, x509.SHA256WithRSA)
+	csrECPEM := generateCSR(t, skEC, x509.ECDSAWithSHA256)
 
 	baseIssuer := gen.Issuer("test-issuer",
 		gen.SetIssuerSelfSigned(cmapi.SelfSignedIssuer{}),
@@ -140,12 +144,30 @@ func TestSync(t *testing.T) {
 			LastTransitionTime: &nowMetaTime,
 		}),
 	)
+	baseCRNotApprovedEC := gen.CertificateRequest("test-cr",
+		gen.SetCertificateRequestIsCA(false),
+		gen.SetCertificateRequestCSR(csrECPEM),
+		gen.SetCertificateRequestIssuer(cmmeta.ObjectReference{
+			Kind: baseIssuer.Kind,
+			Name: baseIssuer.Name,
+		}),
+	)
+
+	baseCREC := gen.CertificateRequestFrom(baseCRNotApprovedEC,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionApproved,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "cert-manager.io",
+			Message:            "Certificate request has been approved by cert-manager.io",
+			LastTransitionTime: &nowMetaTime,
+		}),
+	)
 
 	certRSAPEM := generateSelfSignedCert(t, baseCR, skRSA, fixedClockStart, fixedClockStart.Add(time.Hour*12))
 	certRSAPEMExpired := generateSelfSignedCert(t, baseCR, skRSA, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
 
-	certECPEM := generateSelfSignedCert(t, baseCR, skEC, fixedClockStart, fixedClockStart.Add(time.Hour*12))
-	certECPEMExpired := generateSelfSignedCert(t, baseCR, skEC, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
+	certECPEM := generateSelfSignedCert(t, baseCREC, skEC, fixedClockStart, fixedClockStart.Add(time.Hour*12))
+	certECPEMExpired := generateSelfSignedCert(t, baseCREC, skEC, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
 
 	tests := map[string]testT{
 		"should return nil (no action) if group name if not 'cert-manager.io' or ''": {
@@ -742,7 +764,7 @@ func runTest(t *testing.T, test testT) {
 		}
 	}
 
-	c := New(util.IssuerSelfSigned, test.issuerImpl)
+	c := New(util.IssuerSelfSigned, func(*controller.Context) Issuer { return test.issuerImpl })
 	c.Register(test.builder.Context)
 
 	if test.helper != nil {

@@ -28,11 +28,11 @@ import (
 
 	certificatesv1 "k8s.io/api/certificates/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	experimentalapi "github.com/jetstack/cert-manager/pkg/apis/experimental/v1alpha1"
-	ctrlutil "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/util"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	experimentalapi "github.com/cert-manager/cert-manager/pkg/apis/experimental/v1alpha1"
+	ctrlutil "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/util"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 // ValidationFunc describes a CertificateSigningRequest validation helper function
@@ -194,8 +194,12 @@ func ExpectValidDuration(csr *certificatesv1.CertificateSigningRequest, _ crypto
 	var expectedDuration time.Duration
 	durationString, ok := csr.Annotations[experimentalapi.CertificateSigningRequestDurationAnnotationKey]
 	if !ok {
-		// If duration wasn't requested, then we match against the default.
-		expectedDuration = cmapi.DefaultCertificateDuration
+		if csr.Spec.ExpirationSeconds != nil {
+			expectedDuration = time.Duration(*csr.Spec.ExpirationSeconds) * time.Second
+		} else {
+			// If duration wasn't requested, then we match against the default.
+			expectedDuration = cmapi.DefaultCertificateDuration
+		}
 	} else {
 		expectedDuration, err = time.ParseDuration(durationString)
 		if err != nil {

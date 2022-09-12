@@ -88,7 +88,7 @@ If release name contains chart name it will be used as a full name.
 {{- end -}}
 
 {{- define "webhook.caRef" -}}
-{{ .Release.Namespace}}/{{ template "webhook.fullname" . }}-ca
+{{- template "cert-manager.namespace" }}/{{ template "webhook.fullname" . }}-ca
 {{- end -}}
 
 {{/*
@@ -152,6 +152,40 @@ Create the name of the service account to use
 {{- end -}}
 
 {{/*
+startupapicheck templates
+*/}}
+
+{{/*
+Expand the name of the chart.
+Manually fix the 'app' and 'name' labels to 'startupapicheck' to maintain
+compatibility with the v0.9 deployment selector.
+*/}}
+{{- define "startupapicheck.name" -}}
+{{- printf "startupapicheck" -}}
+{{- end -}}
+
+{{/*
+Create a default fully qualified app name.
+We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+If release name contains chart name it will be used as a full name.
+*/}}
+{{- define "startupapicheck.fullname" -}}
+{{- $trimmedName := printf "%s" (include "cert-manager.fullname" .) | trunc 52 | trimSuffix "-" -}}
+{{- printf "%s-startupapicheck" $trimmedName | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "startupapicheck.serviceAccountName" -}}
+{{- if .Values.startupapicheck.serviceAccount.create -}}
+    {{ default (include "startupapicheck.fullname" .) .Values.startupapicheck.serviceAccount.name }}
+{{- else -}}
+    {{ default "default" .Values.startupapicheck.serviceAccount.name }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "chartName" -}}
@@ -167,4 +201,16 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ include "chartName" . }}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Namespace for all resources to be installed into
+If not defined in values file then the helm release namespace is used
+By default this is not set so the helm release namespace will be used
+
+This gets around an problem within helm discussed here
+https://github.com/helm/helm/issues/5358
+*/}}
+{{- define "cert-manager.namespace" -}}
+    {{ .Values.namespace | default .Release.Namespace }}
 {{- end -}}

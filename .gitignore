@@ -13,3 +13,8 @@ bazel-*
 /.project
 _artifacts/
 /vendor/
+bin/
+_bin/
+.bin/
+user.bazelrc
+*.bak

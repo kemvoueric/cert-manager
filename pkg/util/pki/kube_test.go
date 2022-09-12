@@ -26,8 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	certificatesv1 "k8s.io/api/certificates/v1"
 
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 func TestGenerateTemplateFromCertificateSigningRequest(t *testing.T) {
@@ -79,7 +79,7 @@ func TestGenerateTemplateFromCertificateSigningRequest(t *testing.T) {
 				gen.SetCertificateSigningRequestRequest(csr),
 			),
 			expCertificate: &x509.Certificate{
-				Version:               0,
+				Version:               2,
 				BasicConstraintsValid: true,
 				SerialNumber:          nil,
 				PublicKeyAlgorithm:    x509.RSA,
@@ -112,7 +112,7 @@ func TestGenerateTemplateFromCertificateSigningRequest(t *testing.T) {
 				gen.SetCertificateSigningRequestRequest(csr),
 			),
 			expCertificate: &x509.Certificate{
-				Version:               0,
+				Version:               2,
 				BasicConstraintsValid: true,
 				SerialNumber:          nil,
 				PublicKeyAlgorithm:    x509.RSA,
@@ -123,6 +123,73 @@ func TestGenerateTemplateFromCertificateSigningRequest(t *testing.T) {
 				},
 				NotBefore: time.Now(),
 				NotAfter:  time.Now().Add(10 * time.Minute),
+				KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign | x509.KeyUsageContentCommitment,
+				ExtKeyUsage: []x509.ExtKeyUsage{
+					x509.ExtKeyUsageAny,
+					x509.ExtKeyUsageCodeSigning,
+				},
+				DNSNames: []string{"example.com", "foo.example.com"},
+			},
+		},
+		"a CSR with expiration seconds that is valid should return a valid *x509.Certificate": {
+			csr: gen.CertificateSigningRequest("",
+				gen.SetCertificateSigningRequestExpirationSeconds(999),
+				gen.SetCertificateSigningRequestUsages([]certificatesv1.KeyUsage{
+					certificatesv1.UsageAny,
+					certificatesv1.UsageDigitalSignature,
+					certificatesv1.UsageCRLSign,
+					certificatesv1.UsageCodeSigning,
+					certificatesv1.UsageContentCommitment,
+				}),
+				gen.SetCertificateSigningRequestIsCA(false),
+				gen.SetCertificateSigningRequestRequest(csr),
+			),
+			expCertificate: &x509.Certificate{
+				Version:               2,
+				BasicConstraintsValid: true,
+				SerialNumber:          nil,
+				PublicKeyAlgorithm:    x509.RSA,
+				PublicKey:             pk.Public(),
+				IsCA:                  false,
+				Subject: pkix.Name{
+					CommonName: "example.com",
+				},
+				NotBefore: time.Now(),
+				NotAfter:  time.Now().Add(999 * time.Second),
+				KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign | x509.KeyUsageContentCommitment,
+				ExtKeyUsage: []x509.ExtKeyUsage{
+					x509.ExtKeyUsageAny,
+					x509.ExtKeyUsageCodeSigning,
+				},
+				DNSNames: []string{"example.com", "foo.example.com"},
+			},
+		},
+		"a CSR with expiration seconds and duration annotation should prefer the annotation duration": {
+			csr: gen.CertificateSigningRequest("",
+				gen.SetCertificateSigningRequestExpirationSeconds(999),
+				gen.SetCertificateSigningRequestDuration("777s"),
+				gen.SetCertificateSigningRequestUsages([]certificatesv1.KeyUsage{
+					certificatesv1.UsageAny,
+					certificatesv1.UsageDigitalSignature,
+					certificatesv1.UsageCRLSign,
+					certificatesv1.UsageCodeSigning,
+					certificatesv1.UsageContentCommitment,
+				}),
+				gen.SetCertificateSigningRequestIsCA(false),
+				gen.SetCertificateSigningRequestRequest(csr),
+			),
+			expCertificate: &x509.Certificate{
+				Version:               2,
+				BasicConstraintsValid: true,
+				SerialNumber:          nil,
+				PublicKeyAlgorithm:    x509.RSA,
+				PublicKey:             pk.Public(),
+				IsCA:                  false,
+				Subject: pkix.Name{
+					CommonName: "example.com",
+				},
+				NotBefore: time.Now(),
+				NotAfter:  time.Now().Add(777 * time.Second),
 				KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign | x509.KeyUsageContentCommitment,
 				ExtKeyUsage: []x509.ExtKeyUsage{
 					x509.ExtKeyUsageAny,
@@ -153,6 +220,7 @@ func TestGenerateTemplateFromCertificateSigningRequest(t *testing.T) {
 				templ.NotBefore = time.Time{}
 				templ.SerialNumber = nil
 				templ.Subject.Names = nil
+				templ.RawSubject = nil
 
 				assert.Equal(t, test.expCertificate, templ)
 			}

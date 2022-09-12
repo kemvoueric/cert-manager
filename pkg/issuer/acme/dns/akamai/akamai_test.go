@@ -24,7 +24,7 @@ import (
 
 	dns "github.com/akamai/AkamaiOPEN-edgegrid-golang/configdns-v2"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -54,7 +54,6 @@ type StubOpenDNSConfig struct {
 	FuncErrors map[string]error
 }
 
-//
 func findStubHostedDomainByFqdn(fqdn string, ns []string) (string, error) {
 
 	return "test.example.com", nil
@@ -303,7 +302,7 @@ func TestCleanUpFailDeleteRecord(t *testing.T) {
 }
 
 // Stub Get Record
-func (o StubOpenDNSConfig) GetRecord(zone string, name string, record_type string) (*dns.RecordBody, error) {
+func (o StubOpenDNSConfig) GetRecord(zone string, name string, recordType string) (*dns.RecordBody, error) {
 
 	var rec *dns.RecordBody
 
@@ -322,7 +321,7 @@ func (o StubOpenDNSConfig) GetRecord(zone string, name string, record_type strin
 		if name != rec.Name {
 			return nil, fmt.Errorf("GetRecord: expected/actual Name don't match")
 		}
-		if record_type != rec.RecordType {
+		if recordType != rec.RecordType {
 			return nil, fmt.Errorf("GetRecord: expected/actual Record Type don't match")
 		}
 	}

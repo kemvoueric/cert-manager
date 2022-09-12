@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 )
 
 func buildCertificateWithKeyParams(keyAlgo v1.PrivateKeyAlgorithm, keySize int) *v1.Certificate {
@@ -255,7 +255,7 @@ func signTestCert(key crypto.Signer) *x509.Certificate {
 	}
 
 	template := &x509.Certificate{
-		Version:               3,
+		Version:               2,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		SignatureAlgorithm:    x509.SHA256WithRSA,
@@ -318,7 +318,6 @@ func TestPublicKeyMatchesCertificateRequest(t *testing.T) {
 	}
 
 	template := &x509.CertificateRequest{
-		Version: 3,
 		// SignatureAlgorithm: sigAlgo,
 		Subject: pkix.Name{
 			CommonName: "cn",

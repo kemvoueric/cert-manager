@@ -22,13 +22,13 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	"github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/acmeorders/selectors"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	"github.com/cert-manager/cert-manager/pkg/api/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/acmeorders/selectors"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 var (
@@ -73,7 +73,6 @@ func buildChallenge(ctx context.Context, cl acmecl.Interface, issuer cmapi.Gener
 			Name:            chName,
 			Namespace:       o.Namespace,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(o, orderGvk)},
-			Finalizers:      []string{cmacme.ACMEFinalizer},
 		},
 		Spec: *chSpec,
 	}, nil

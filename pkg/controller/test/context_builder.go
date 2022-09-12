@@ -30,6 +30,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	kubeinformers "k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	coretesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/clock"
@@ -37,14 +38,14 @@ import (
 	gwfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmfake "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/fake"
-	informers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	"github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/metrics"
-	"github.com/jetstack/cert-manager/pkg/util"
-	discoveryfake "github.com/jetstack/cert-manager/test/unit/discovery"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmfake "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/fake"
+	informers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	discoveryfake "github.com/cert-manager/cert-manager/test/unit/discovery"
 )
 
 func init() {
@@ -96,7 +97,7 @@ func (b *Builder) generateNameReactor(action coretesting.Action) (handled bool, 
 	return false, obj.(runtime.Object), nil
 }
 
-const informerResyncPeriod = time.Millisecond * 10
+const informerResyncPeriod = time.Second
 
 // Init will construct a new context for this builder and set default values
 // for any unset fields.
@@ -155,6 +156,13 @@ func (b *Builder) Init() {
 	// Fix the clock used in apiutil so that calls to set status conditions
 	// can be predictably tested
 	apiutil.Clock = b.Context.Clock
+}
+
+// InitWithRESTConfig() will call builder.Init(), then assign an initialised
+// RESTConfig with a `cert-manager/unit-test` User Agent.
+func (b *Builder) InitWithRESTConfig() {
+	b.Init()
+	b.RESTConfig = util.RestConfigWithUserAgent(new(rest.Config), "unit-testing")
 }
 
 func (b *Builder) FakeKubeClient() *kubefake.Clientset {
@@ -224,7 +232,7 @@ func (b *Builder) AllReactorsCalled() error {
 
 func (b *Builder) AllEventsCalled() error {
 	var errs []error
-	if !util.EqualSorted(b.ExpectedEvents, b.Events()) {
+	if !util.EqualUnsorted(b.ExpectedEvents, b.Events()) {
 		errs = append(errs, fmt.Errorf("got unexpected events, exp='%s' got='%s'",
 			b.ExpectedEvents, b.Events()))
 	}
@@ -286,7 +294,7 @@ func (b *Builder) AllActionsExecuted() error {
 }
 
 func actionToString(a coretesting.Action) string {
-	return fmt.Sprintf("%s %q in namespace %s", a.GetVerb(), a.GetResource(), a.GetNamespace())
+	return fmt.Sprintf("%s %s %q in namespace %s", a.GetVerb(), a.GetSubresource(), a.GetResource(), a.GetNamespace())
 }
 
 // Stop will signal the informers to stop watching changes
@@ -324,7 +332,7 @@ func (b *Builder) Sync() {
 	if b.additionalSyncFuncs != nil {
 		cache.WaitForCacheSync(b.stopCh, b.additionalSyncFuncs...)
 	}
-	time.Sleep(informerResyncPeriod * 3)
+	time.Sleep(informerResyncPeriod)
 }
 
 // RegisterAdditionalSyncFuncs registers an additional InformerSynced function

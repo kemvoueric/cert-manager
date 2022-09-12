@@ -22,7 +22,7 @@ import (
 	certificatesv1 "k8s.io/api/certificates/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	experimentalapi "github.com/jetstack/cert-manager/pkg/apis/experimental/v1alpha1"
+	experimentalapi "github.com/cert-manager/cert-manager/pkg/apis/experimental/v1alpha1"
 )
 
 type CertificateSigningRequestModifier func(*certificatesv1.CertificateSigningRequest)
@@ -92,6 +92,12 @@ func AddCertificateSigningRequestAnnotations(annotations map[string]string) Cert
 func SetCertificateSigningRequestSignerName(signerName string) CertificateSigningRequestModifier {
 	return func(csr *certificatesv1.CertificateSigningRequest) {
 		csr.Spec.SignerName = signerName
+	}
+}
+
+func SetCertificateSigningRequestExpirationSeconds(seconds int32) CertificateSigningRequestModifier {
+	return func(csr *certificatesv1.CertificateSigningRequest) {
+		csr.Spec.ExpirationSeconds = &seconds
 	}
 }
 

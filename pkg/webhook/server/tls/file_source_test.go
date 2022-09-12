@@ -17,25 +17,26 @@ limitations under the License.
 package tls
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	logtesting "github.com/go-logr/logr/testing"
 	"golang.org/x/sync/errgroup"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	logtesting "github.com/jetstack/cert-manager/pkg/logs/testing"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 func TestFileSource_ReadsFile(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test-filesource-readsfile-")
+	dir, err := os.MkdirTemp("", "test-filesource-readsfile-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,37 +56,37 @@ func TestFileSource_ReadsFile(t *testing.T) {
 		CertPath:       certFile,
 		KeyPath:        pkFile,
 		UpdateInterval: interval,
-		Log:            logtesting.TestLogger{T: t},
+		log:            logtesting.NewTestLogger(t),
 	}
-	stopCh := make(chan struct{})
+	ctx, cancel := context.WithCancel(logr.NewContext(context.Background(), logtesting.NewTestLogger(t)))
 	errGroup := new(errgroup.Group)
 	errGroup.Go(func() error {
-		return source.Run(stopCh)
+		return source.Run(ctx)
 	})
 
 	time.Sleep(interval * 2)
 	cert, err := source.GetCertificate(nil)
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("got an unexpected error: %v", err)
 	}
 	x509Crt, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("failed to decode x509 certificate: %v", err)
 	}
 	if x509Crt.Subject.SerialNumber != serial {
-		close(stopCh)
+		cancel()
 		t.Errorf("certificate had unexpected serial number. exp=%s, got=%s", serial, x509Crt.Subject.SerialNumber)
 	}
-	close(stopCh)
+	cancel()
 	if err := errGroup.Wait(); err != nil {
 		t.Errorf("FileCertificateSource failed %v", err)
 	}
 }
 
 func TestFileSource_UpdatesFile(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test-filesource-updatesfile-")
+	dir, err := os.MkdirTemp("", "test-filesource-updatesfile-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,27 +106,26 @@ func TestFileSource_UpdatesFile(t *testing.T) {
 		CertPath:       certFile,
 		KeyPath:        pkFile,
 		UpdateInterval: interval,
-		Log:            logtesting.TestLogger{T: t},
 	}
-	stopCh := make(chan struct{})
+	ctx, cancel := context.WithCancel(logr.NewContext(context.Background(), logtesting.NewTestLogger(t)))
 	errGroup := new(errgroup.Group)
 	errGroup.Go(func() error {
-		return source.Run(stopCh)
+		return source.Run(ctx)
 	})
 
 	time.Sleep(interval * 2)
 	cert, err := source.GetCertificate(nil)
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("got an unexpected error: %v", err)
 	}
 	x509Crt, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("failed to decode x509 certificate: %v", err)
 	}
 	if x509Crt.Subject.SerialNumber != serial {
-		close(stopCh)
+		cancel()
 		t.Errorf("certificate had unexpected serial number. exp=%s, got=%s", serial, x509Crt.Subject.SerialNumber)
 	}
 
@@ -138,20 +138,20 @@ func TestFileSource_UpdatesFile(t *testing.T) {
 	time.Sleep(interval * 2)
 	cert, err = source.GetCertificate(nil)
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("got an unexpected error: %v", err)
 	}
 	x509Crt, err = x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		close(stopCh)
+		cancel()
 		t.Fatalf("failed to decode x509 certificate: %v", err)
 	}
 	if x509Crt.Subject.SerialNumber != serial {
-		close(stopCh)
+		cancel()
 		t.Errorf("certificate had unexpected serial number. exp=%s, got=%s", serial, x509Crt.Subject.SerialNumber)
 	}
 
-	close(stopCh)
+	cancel()
 	if err := errGroup.Wait(); err != nil {
 		t.Errorf("FileCertificateSource failed: %v", err)
 	}
@@ -174,7 +174,7 @@ func generatePrivateKeyAndCertificate(t *testing.T, serial string) ([]byte, []by
 		t.Fatal(err)
 	}
 	cert := &x509.Certificate{
-		Version:               3,
+		Version:               2,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		PublicKeyAlgorithm:    x509.RSA,

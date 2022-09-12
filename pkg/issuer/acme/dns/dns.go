@@ -24,26 +24,26 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 
-	"github.com/jetstack/cert-manager/pkg/acme/webhook"
-	whapi "github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/acmedns"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/akamai"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/azuredns"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/clouddns"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/cloudflare"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/digitalocean"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/rfc2136"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/route53"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
-	webhookslv "github.com/jetstack/cert-manager/pkg/issuer/acme/dns/webhook"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
+	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/acmedns"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/akamai"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/azuredns"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/clouddns"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/cloudflare"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/digitalocean"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/rfc2136"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/route53"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
+	webhookslv "github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/webhook"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 // solver is the old solver type interface.
@@ -58,9 +58,9 @@ type solver interface {
 // constructors may be set.
 type dnsProviderConstructors struct {
 	cloudDNS     func(project string, serviceAccount []byte, dns01Nameservers []string, ambient bool, hostedZoneName string) (*clouddns.DNSProvider, error)
-	cloudFlare   func(email, apikey, apiToken string, dns01Nameservers []string) (*cloudflare.DNSProvider, error)
-	route53      func(accessKey, secretKey, hostedZoneID, region, role string, ambient bool, dns01Nameservers []string) (*route53.DNSProvider, error)
-	azureDNS     func(environment, clientID, clientSecret, subscriptionID, tenantID, resourceGroupName, hostedZoneName string, dns01Nameservers []string, ambient bool) (*azuredns.DNSProvider, error)
+	cloudFlare   func(email, apikey, apiToken string, dns01Nameservers []string, userAgent string) (*cloudflare.DNSProvider, error)
+	route53      func(accessKey, secretKey, hostedZoneID, region, role string, ambient bool, dns01Nameservers []string, userAgent string) (*route53.DNSProvider, error)
+	azureDNS     func(environment, clientID, clientSecret, subscriptionID, tenantID, resourceGroupName, hostedZoneName string, dns01Nameservers []string, ambient bool, managedIdentity *cmacme.AzureManagedIdentity) (*azuredns.DNSProvider, error)
 	acmeDNS      func(host string, accountJson []byte, dns01Nameservers []string) (*acmedns.DNSProvider, error)
 	digitalOcean func(token string, dns01Nameservers []string) (*digitalocean.DNSProvider, error)
 }
@@ -273,7 +273,7 @@ func (s *Solver) solverForChallenge(ctx context.Context, issuer v1.GenericIssuer
 		}
 
 		email := providerConfig.Cloudflare.Email
-		impl, err = s.dnsProviderConstructors.cloudFlare(email, apiKey, apiToken, s.DNS01Nameservers)
+		impl, err = s.dnsProviderConstructors.cloudFlare(email, apiKey, apiToken, s.DNS01Nameservers, s.RESTConfig.UserAgent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error instantiating cloudflare challenge solver: %s", err)
 		}
@@ -292,6 +292,44 @@ func (s *Solver) solverForChallenge(ctx context.Context, issuer v1.GenericIssuer
 		}
 	case providerConfig.Route53 != nil:
 		dbg.Info("preparing to create Route53 provider")
+
+		// Default to the AccessKeyID literal in the configuration
+		secretAccessKeyID := strings.TrimSpace(providerConfig.Route53.AccessKeyID)
+
+		// If the AccessKeyID secret reference option is defined, override the
+		// secretAccessKeyID variable.
+		if providerConfig.Route53.SecretAccessKeyID != nil {
+			// For route53, you must specify either an AccessKeyID or a secret
+			// reference to an AccessKeyID, but not both.
+			if len(providerConfig.Route53.AccessKeyID) > 0 {
+				return nil, nil, fmt.Errorf("route53 accessKeyID and accessKeyIDSecretRef cannot both be specified")
+			}
+
+			// Ensure Key specified.
+			if len(providerConfig.Route53.SecretAccessKeyID.Key) == 0 {
+				return nil, nil, fmt.Errorf("route53 accessKeyIDSecretRef requires a key field to be specified")
+			}
+
+			// Ensure Name specified.
+			if len(providerConfig.Route53.SecretAccessKeyID.Name) == 0 {
+				return nil, nil, fmt.Errorf("route53 accessKeyIDSecretRef requires a name field to be specified")
+			}
+
+			secretAccessKeyIDSecret, err := s.secretLister.Secrets(resourceNamespace).Get(providerConfig.Route53.SecretAccessKeyID.Name)
+			if err != nil {
+				return nil, nil, fmt.Errorf("error getting route53 secret access key id: %s", err)
+			}
+
+			secretAccessKeyIDBytes, ok := secretAccessKeyIDSecret.Data[providerConfig.Route53.SecretAccessKeyID.Key]
+			if !ok {
+				return nil, nil, fmt.Errorf("no data found in Secret %q at Key %q",
+					providerConfig.Route53.SecretAccessKeyID.Name,
+					providerConfig.Route53.SecretAccessKeyID.Key,
+				)
+			}
+			secretAccessKeyID = string(secretAccessKeyIDBytes)
+		}
+
 		secretAccessKey := ""
 		if providerConfig.Route53.SecretAccessKey.Name != "" {
 			secretAccessKeySecret, err := s.secretLister.Secrets(resourceNamespace).Get(providerConfig.Route53.SecretAccessKey.Name)
@@ -307,13 +345,14 @@ func (s *Solver) solverForChallenge(ctx context.Context, issuer v1.GenericIssuer
 		}
 
 		impl, err = s.dnsProviderConstructors.route53(
-			strings.TrimSpace(providerConfig.Route53.AccessKeyID),
+			secretAccessKeyID,
 			strings.TrimSpace(secretAccessKey),
 			providerConfig.Route53.HostedZoneID,
 			providerConfig.Route53.Region,
 			providerConfig.Route53.Role,
 			canUseAmbientCredentials,
 			s.DNS01Nameservers,
+			s.RESTConfig.UserAgent,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error instantiating route53 challenge solver: %s", err)
@@ -345,6 +384,7 @@ func (s *Solver) solverForChallenge(ctx context.Context, issuer v1.GenericIssuer
 			providerConfig.AzureDNS.HostedZoneName,
 			s.DNS01Nameservers,
 			canUseAmbientCredentials,
+			providerConfig.AzureDNS.ManagedIdentity,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error instantiating azuredns challenge solver: %s", err)
@@ -416,7 +456,7 @@ func (s *Solver) prepareChallengeRequest(issuer v1.GenericIssuer, ch *cmacme.Cha
 		ResourceNamespace:       resourceNamespace,
 		Key:                     ch.Spec.Key,
 		DNSName:                 ch.Spec.DNSName,
-		Config:                  &apiext.JSON{Raw: b},
+		Config:                  &apiextensionsv1.JSON{Raw: b},
 	}
 
 	return webhookSolver, req, nil

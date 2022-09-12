@@ -30,11 +30,11 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	"k8s.io/utils/pointer"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 func mustGenerateRSA(t *testing.T, keySize int) []byte {
@@ -435,7 +435,7 @@ func TestProcessItem(t *testing.T) {
 			secrets: []runtime.Object{
 				ownedSecretWithName("testns", "fixed-name", "test", map[string][]byte{"tls.key": mustGenerateECDSA(t, pki.ECCurve256)}),
 			},
-			expectedEvents: []string{"Normal Deleted Regenerating private key due to change in fields: [spec.keyAlgorithm]"},
+			expectedEvents: []string{"Normal Deleted Regenerating private key due to change in fields: [spec.privateKey.algorithm]"},
 			expectedActions: []testpkg.Action{
 				testpkg.NewAction(coretesting.NewDeleteAction(
 					corev1.SchemeGroupVersion.WithResource("secrets"),

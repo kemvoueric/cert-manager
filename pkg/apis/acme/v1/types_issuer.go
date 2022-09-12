@@ -18,9 +18,10 @@ package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 )
 
 // ACMEIssuer contains the specification for an ACME issuer.
@@ -135,8 +136,9 @@ const (
 	HS512 HMACKeyAlgorithm = "HS512"
 )
 
-// Configures an issuer to solve challenges using the specified options.
-// Only one of HTTP01 or DNS01 may be provided.
+// An ACMEChallengeSolver describes how to solve ACME challenges for the issuer it is part of.
+// A selector may be provided to use different solving strategies for different DNS names.
+// Only one of HTTP01 or DNS01 must be provided.
 type ACMEChallengeSolver struct {
 	// Selector selects a set of DNSNames on the Certificate resource that
 	// should be solved using this challenge solver.
@@ -159,7 +161,7 @@ type ACMEChallengeSolver struct {
 	DNS01 *ACMEChallengeSolverDNS01 `json:"dns01,omitempty"`
 }
 
-// CertificateDomainSelector selects certificates using a label selector, and
+// CertificateDNSNameSelector selects certificates using a label selector, and
 // can optionally select individual DNS names within those certificates.
 // If both MatchLabels and DNSNames are empty, this selector will match all
 // certificates and DNS names within them.
@@ -197,6 +199,7 @@ type CertificateDNSNameSelector struct {
 // Typically this is accomplished through creating 'routes' of some description
 // that configure ingress controllers to direct traffic to 'solver pods', which
 // are responsible for responding to the ACME server's HTTP requests.
+// Only one of Ingress / Gateway can be specified.
 type ACMEChallengeSolverHTTP01 struct {
 	// The ingress based HTTP01 challenge solver will solve challenges by
 	// creating or modifying Ingress resources in order to route requests for
@@ -204,10 +207,18 @@ type ACMEChallengeSolverHTTP01 struct {
 	// provisioned by cert-manager for each Challenge to be completed.
 	// +optional
 	Ingress *ACMEChallengeSolverHTTP01Ingress `json:"ingress,omitempty"`
+
+	// The Gateway API is a sig-network community API that models service networking
+	// in Kubernetes (https://gateway-api.sigs.k8s.io/). The Gateway solver will
+	// create HTTPRoutes with the specified labels in the same namespace as the challenge.
+	// This solver is experimental, and fields / behaviour may change in the future.
+	// +optional
+	GatewayHTTPRoute *ACMEChallengeSolverHTTP01GatewayHTTPRoute `json:"gatewayHTTPRoute,omitempty"`
 }
 
 type ACMEChallengeSolverHTTP01Ingress struct {
-	// Optional service type for Kubernetes solver service
+	// Optional service type for Kubernetes solver service. Supported values
+	// are NodePort or ClusterIP. If unset, defaults to NodePort.
 	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
@@ -226,14 +237,34 @@ type ACMEChallengeSolverHTTP01Ingress struct {
 	Name string `json:"name,omitempty"`
 
 	// Optional pod template used to configure the ACME challenge solver pods
-	// used for HTTP01 challenges
+	// used for HTTP01 challenges.
 	// +optional
 	PodTemplate *ACMEChallengeSolverHTTP01IngressPodTemplate `json:"podTemplate,omitempty"`
 
 	// Optional ingress template used to configure the ACME challenge solver
-	// ingress used for HTTP01 challenges
+	// ingress used for HTTP01 challenges.
 	// +optional
 	IngressTemplate *ACMEChallengeSolverHTTP01IngressTemplate `json:"ingressTemplate,omitempty"`
+}
+
+// The ACMEChallengeSolverHTTP01GatewayHTTPRoute solver will create HTTPRoute objects for a Gateway class
+// routing to an ACME challenge solver pod.
+type ACMEChallengeSolverHTTP01GatewayHTTPRoute struct {
+	// Optional service type for Kubernetes solver service. Supported values
+	// are NodePort or ClusterIP. If unset, defaults to NodePort.
+	// +optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+
+	// Custom labels that will be applied to HTTPRoutes created by cert-manager
+	// while solving HTTP-01 challenges.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// When solving an HTTP-01 challenge, cert-manager creates an HTTPRoute.
+	// cert-manager needs to know which parentRefs should be used when creating
+	// the HTTPRoute. Usually, the parentRef references a Gateway. See:
+	// https://gateway-api.sigs.k8s.io/v1alpha2/api-types/httproute/#attaching-to-gateways
+	ParentRefs []gwapi.ParentReference `json:"parentRefs,omitempty"`
 }
 
 type ACMEChallengeSolverHTTP01IngressPodTemplate struct {
@@ -424,13 +455,27 @@ type ACMEIssuerDNS01ProviderDigitalOcean struct {
 // ACMEIssuerDNS01ProviderRoute53 is a structure containing the Route 53
 // configuration for AWS
 type ACMEIssuerDNS01ProviderRoute53 struct {
-	// The AccessKeyID is used for authentication. If not set we fall-back to using env vars, shared credentials file or AWS Instance metadata
+	// The AccessKeyID is used for authentication.
+	// Cannot be set when SecretAccessKeyID is set.
+	// If neither the Access Key nor Key ID are set, we fall-back to using env
+	// vars, shared credentials file or AWS Instance metadata,
 	// see: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials
 	// +optional
 	AccessKeyID string `json:"accessKeyID,omitempty"`
 
-	// The SecretAccessKey is used for authentication. If not set we fall-back to using env vars, shared credentials file or AWS Instance metadata
-	// https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials
+	// The SecretAccessKey is used for authentication. If set, pull the AWS
+	// access key ID from a key within a Kubernetes Secret.
+	// Cannot be set when AccessKeyID is set.
+	// If neither the Access Key nor Key ID are set, we fall-back to using env
+	// vars, shared credentials file or AWS Instance metadata,
+	// see: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials
+	// +optional
+	SecretAccessKeyID *cmmeta.SecretKeySelector `json:"accessKeyIDSecretRef,omitempty"`
+
+	// The SecretAccessKey is used for authentication.
+	// If neither the Access Key nor Key ID are set, we fall-back to using env
+	// vars, shared credentials file or AWS Instance metadata,
+	// see: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials
 	// +optional
 	SecretAccessKey cmmeta.SecretKeySelector `json:"secretAccessKeySecretRef"`
 
@@ -458,19 +503,37 @@ type ACMEIssuerDNS01ProviderAzureDNS struct {
 	// +optional
 	ClientSecret *cmmeta.SecretKeySelector `json:"clientSecretSecretRef,omitempty"`
 
+	// ID of the Azure subscription
 	SubscriptionID string `json:"subscriptionID"`
 
 	// when specifying ClientID and ClientSecret then this field is also needed
 	// +optional
 	TenantID string `json:"tenantID,omitempty"`
 
+	// resource group the DNS zone is located in
 	ResourceGroupName string `json:"resourceGroupName"`
 
+	// name of the DNS zone that should be used
 	// +optional
 	HostedZoneName string `json:"hostedZoneName,omitempty"`
 
+	// name of the Azure environment (default AzurePublicCloud)
 	// +optional
 	Environment AzureDNSEnvironment `json:"environment,omitempty"`
+
+	// managed identity configuration, can not be used at the same time as clientID, clientSecretSecretRef or tenantID
+	// +optional
+	ManagedIdentity *AzureManagedIdentity `json:"managedIdentity,omitempty"`
+}
+
+type AzureManagedIdentity struct {
+	// client ID of the managed identity, can not be used at the same time as resourceID
+	// +optional
+	ClientID string `json:"clientID,omitempty"`
+
+	// resource ID of the managed identity, can not be used at the same time as clientID
+	// +optional
+	ResourceID string `json:"resourceID,omitempty"`
 }
 
 // +kubebuilder:validation:Enum=AzurePublicCloud;AzureChinaCloud;AzureGermanCloud;AzureUSGovernmentCloud
@@ -541,7 +604,7 @@ type ACMEIssuerDNS01ProviderWebhook struct {
 	// For details on the schema of this field, consult the webhook provider
 	// implementation's documentation.
 	// +optional
-	Config *apiext.JSON `json:"config,omitempty"`
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
 type ACMEIssuerStatus struct {

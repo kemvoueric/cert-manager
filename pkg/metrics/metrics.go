@@ -17,9 +17,11 @@ limitations under the License.
 // Package metrics contains global structures related to metrics collection
 // cert-manager exposes the following metrics:
 // certificate_expiration_timestamp_seconds{name, namespace}
+// certificate_renewal_timestamp_seconds{name, namespace}
 // certificate_ready_status{name, namespace, condition}
 // acme_client_request_count{"scheme", "host", "path", "method", "status"}
 // acme_client_request_duration_seconds{"scheme", "host", "path", "method", "status"}
+// venafi_client_request_duration_seconds{"scheme", "host", "path", "method", "status"}
 // controller_sync_call_count{"controller"}
 package metrics
 
@@ -28,15 +30,12 @@ import (
 	"net/http"
 	"time"
 
-	"k8s.io/utils/clock"
-
 	"github.com/go-logr/logr"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/utils/clock"
 
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/util/profiling"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 )
 
 const (
@@ -53,22 +52,47 @@ type Metrics struct {
 	log      logr.Logger
 	registry *prometheus.Registry
 
-	clockTimeSeconds                 prometheus.CounterFunc
-	certificateExpiryTimeSeconds     *prometheus.GaugeVec
-	certificateReadyStatus           *prometheus.GaugeVec
-	acmeClientRequestDurationSeconds *prometheus.SummaryVec
-	acmeClientRequestCount           *prometheus.CounterVec
-	controllerSyncCallCount          *prometheus.CounterVec
+	clockTimeSeconds                   prometheus.CounterFunc
+	clockTimeSecondsGauge              prometheus.GaugeFunc
+	certificateExpiryTimeSeconds       *prometheus.GaugeVec
+	certificateRenewalTimeSeconds      *prometheus.GaugeVec
+	certificateReadyStatus             *prometheus.GaugeVec
+	acmeClientRequestDurationSeconds   *prometheus.SummaryVec
+	acmeClientRequestCount             *prometheus.CounterVec
+	venafiClientRequestDurationSeconds *prometheus.SummaryVec
+	controllerSyncCallCount            *prometheus.CounterVec
+	controllerSyncErrorCount           *prometheus.CounterVec
 }
 
 var readyConditionStatuses = [...]cmmeta.ConditionStatus{cmmeta.ConditionTrue, cmmeta.ConditionFalse, cmmeta.ConditionUnknown}
 
+// New creates a Metrics struct and populates it with prometheus metric types.
 func New(log logr.Logger, c clock.Clock) *Metrics {
 	var (
+		// Deprecated in favour of clock_time_seconds_gauge.
 		clockTimeSeconds = prometheus.NewCounterFunc(
 			prometheus.CounterOpts{
 				Namespace: namespace,
 				Name:      "clock_time_seconds",
+				Help:      "DEPRECATED: use clock_time_seconds_gauge instead. The clock time given in seconds (from 1970/01/01 UTC).",
+			},
+			func() float64 {
+				return float64(c.Now().Unix())
+			},
+		)
+
+		// The clockTimeSeconds metric was first added, however this was
+		// erroneously made a "counter" metric type. Time can in fact go backwards,
+		// see:
+		// - https://github.com/cert-manager/cert-manager/issues/4560
+		// - https://www.robustperception.io/are-increasing-timestamps-counters-or-gauges
+		// In order to not break users relying on the `clock_time_seconds` metric,
+		// a new `clock_time_seconds_gauge` metric of type gauge is added which
+		// implements the same thing.
+		clockTimeSecondsGauge = prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "clock_time_seconds_gauge",
 				Help:      "The clock time given in seconds (from 1970/01/01 UTC).",
 			},
 			func() float64 {
@@ -81,6 +105,15 @@ func New(log logr.Logger, c clock.Clock) *Metrics {
 				Namespace: namespace,
 				Name:      "certificate_expiration_timestamp_seconds",
 				Help:      "The date after which the certificate expires. Expressed as a Unix Epoch Time.",
+			},
+			[]string{"name", "namespace"},
+		)
+
+		certificateRenewalTimeSeconds = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "certificate_renewal_timestamp_seconds",
+				Help:      "The number of seconds before expiration time the certificate should renew.",
 			},
 			[]string{"name", "namespace"},
 		)
@@ -119,11 +152,35 @@ func New(log logr.Logger, c clock.Clock) *Metrics {
 			[]string{"scheme", "host", "path", "method", "status"},
 		)
 
+		// venafiClientRequestDurationSeconds is a Prometheus summary to
+		// collect api call latencies for the Venafi client. This
+		// metric is in alpha since cert-manager 1.9. Move it to GA once
+		// we have seen that it helps to measure Venafi call latency.
+		venafiClientRequestDurationSeconds = prometheus.NewSummaryVec(
+			prometheus.SummaryOpts{
+				Namespace:  namespace,
+				Name:       "venafi_client_request_duration_seconds",
+				Help:       "ALPHA: The HTTP request latencies in seconds for the Venafi client. This metric is currently alpha as we would like to understand whether it helps to measure Venafi call latency. Please leave feedback if you have any.",
+				Subsystem:  "http",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+			},
+			[]string{"api_call"},
+		)
+
 		controllerSyncCallCount = prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
 				Name:      "controller_sync_call_count",
 				Help:      "The number of sync() calls made by a controller.",
+			},
+			[]string{"controller"},
+		)
+
+		controllerSyncErrorCount = prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "controller_sync_error_count",
+				Help:      "The number of errors encountered during controller sync().",
 			},
 			[]string{"controller"},
 		)
@@ -134,31 +191,36 @@ func New(log logr.Logger, c clock.Clock) *Metrics {
 		log:      log.WithName("metrics"),
 		registry: prometheus.NewRegistry(),
 
-		clockTimeSeconds:                 clockTimeSeconds,
-		certificateExpiryTimeSeconds:     certificateExpiryTimeSeconds,
-		certificateReadyStatus:           certificateReadyStatus,
-		acmeClientRequestCount:           acmeClientRequestCount,
-		acmeClientRequestDurationSeconds: acmeClientRequestDurationSeconds,
-		controllerSyncCallCount:          controllerSyncCallCount,
+		clockTimeSeconds:                   clockTimeSeconds,
+		clockTimeSecondsGauge:              clockTimeSecondsGauge,
+		certificateExpiryTimeSeconds:       certificateExpiryTimeSeconds,
+		certificateRenewalTimeSeconds:      certificateRenewalTimeSeconds,
+		certificateReadyStatus:             certificateReadyStatus,
+		acmeClientRequestCount:             acmeClientRequestCount,
+		acmeClientRequestDurationSeconds:   acmeClientRequestDurationSeconds,
+		venafiClientRequestDurationSeconds: venafiClientRequestDurationSeconds,
+		controllerSyncCallCount:            controllerSyncCallCount,
+		controllerSyncErrorCount:           controllerSyncErrorCount,
 	}
 
 	return m
 }
 
-// Start will register the Prometheus metrics, and start the Prometheus server
-func (m *Metrics) NewServer(ln net.Listener, enablePprof bool) *http.Server {
+// NewServer registers Prometheus metrics and returns a new Prometheus metrics HTTP server.
+func (m *Metrics) NewServer(ln net.Listener) *http.Server {
 	m.registry.MustRegister(m.clockTimeSeconds)
+	m.registry.MustRegister(m.clockTimeSecondsGauge)
 	m.registry.MustRegister(m.certificateExpiryTimeSeconds)
+	m.registry.MustRegister(m.certificateRenewalTimeSeconds)
 	m.registry.MustRegister(m.certificateReadyStatus)
 	m.registry.MustRegister(m.acmeClientRequestDurationSeconds)
+	m.registry.MustRegister(m.venafiClientRequestDurationSeconds)
 	m.registry.MustRegister(m.acmeClientRequestCount)
 	m.registry.MustRegister(m.controllerSyncCallCount)
+	m.registry.MustRegister(m.controllerSyncErrorCount)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
-	if enablePprof {
-		profiling.Install(mux)
-	}
 
 	server := &http.Server{
 		Addr:           ln.Addr().String(),
@@ -167,10 +229,16 @@ func (m *Metrics) NewServer(ln net.Listener, enablePprof bool) *http.Server {
 		MaxHeaderBytes: prometheusMetricsServerMaxHeaderBytes,
 		Handler:        mux,
 	}
+
 	return server
 }
 
 // IncrementSyncCallCount will increase the sync counter for that controller.
 func (m *Metrics) IncrementSyncCallCount(controllerName string) {
 	m.controllerSyncCallCount.WithLabelValues(controllerName).Inc()
+}
+
+// IncrementSyncErrorCount will increase count of errors during sync of that controller.
+func (m *Metrics) IncrementSyncErrorCount(controllerName string) {
+	m.controllerSyncErrorCount.WithLabelValues(controllerName).Inc()
 }

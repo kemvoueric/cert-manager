@@ -17,6 +17,7 @@ limitations under the License.
 package options
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -25,35 +26,36 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	cm "github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	challengescontroller "github.com/jetstack/cert-manager/pkg/controller/acmechallenges"
-	orderscontroller "github.com/jetstack/cert-manager/pkg/controller/acmeorders"
-	shimgatewaycontroller "github.com/jetstack/cert-manager/pkg/controller/certificate-shim/gateways"
-	shimingresscontroller "github.com/jetstack/cert-manager/pkg/controller/certificate-shim/ingresses"
-	cracmecontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/acme"
-	crapprovercontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/approver"
-	crcacontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/ca"
-	crselfsignedcontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/selfsigned"
-	crvaultcontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/vault"
-	crvenaficontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/venafi"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/issuing"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/keymanager"
-	certificatesmetricscontroller "github.com/jetstack/cert-manager/pkg/controller/certificates/metrics"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/readiness"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/requestmanager"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/revisionmanager"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/trigger"
-	csracmecontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/acme"
-	csrcacontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/ca"
-	csrselfsignedcontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/selfsigned"
-	csrvaultcontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/vault"
-	csrvenaficontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/venafi"
-	clusterissuerscontroller "github.com/jetstack/cert-manager/pkg/controller/clusterissuers"
-	issuerscontroller "github.com/jetstack/cert-manager/pkg/controller/issuers"
-	"github.com/jetstack/cert-manager/pkg/feature"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
-	utilfeature "github.com/jetstack/cert-manager/pkg/util/feature"
+	cmdutil "github.com/cert-manager/cert-manager/cmd/util"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	cm "github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	challengescontroller "github.com/cert-manager/cert-manager/pkg/controller/acmechallenges"
+	orderscontroller "github.com/cert-manager/cert-manager/pkg/controller/acmeorders"
+	shimgatewaycontroller "github.com/cert-manager/cert-manager/pkg/controller/certificate-shim/gateways"
+	shimingresscontroller "github.com/cert-manager/cert-manager/pkg/controller/certificate-shim/ingresses"
+	cracmecontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/acme"
+	crapprovercontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/approver"
+	crcacontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/ca"
+	crselfsignedcontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/selfsigned"
+	crvaultcontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/vault"
+	crvenaficontroller "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/venafi"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/issuing"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/keymanager"
+	certificatesmetricscontroller "github.com/cert-manager/cert-manager/pkg/controller/certificates/metrics"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/readiness"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/requestmanager"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/revisionmanager"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/trigger"
+	csracmecontroller "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/acme"
+	csrcacontroller "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/ca"
+	csrselfsignedcontroller "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/selfsigned"
+	csrvaultcontroller "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/vault"
+	csrvenaficontroller "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/venafi"
+	clusterissuerscontroller "github.com/cert-manager/cert-manager/pkg/controller/clusterissuers"
+	issuerscontroller "github.com/cert-manager/cert-manager/pkg/controller/issuers"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 type ControllerOptions struct {
@@ -78,6 +80,8 @@ type ControllerOptions struct {
 	ACMEHTTP01SolverResourceRequestMemory string
 	ACMEHTTP01SolverResourceLimitsCPU     string
 	ACMEHTTP01SolverResourceLimitsMemory  string
+	// Allows specifying a list of custom nameservers to perform HTTP01 checks on.
+	ACMEHTTP01SolverNameservers []string
 
 	ClusterIssuerAmbientCredentials bool
 	IssuerAmbientCredentials        bool
@@ -101,10 +105,15 @@ type ControllerOptions struct {
 	// The host and port address, separated by a ':', that the Prometheus server
 	// should expose metrics on.
 	MetricsListenAddress string
-	// EnablePprof controls whether net/http/pprof handlers are registered with
-	// the HTTP listener.
+	// PprofAddress is the address on which Go profiler will run. Should be
+	// in form <host>:<port>.
+	PprofAddress string
+	// EnablePprof determines whether pprof should be enabled.
 	EnablePprof bool
 
+	// DNSO1CheckRetryPeriod is the period of time after which to check if
+	// challenge URL can be reached by cert-manager controller. This is used
+	// for both DNS-01 and HTTP-01 challenges.
 	DNS01CheckRetryPeriod time.Duration
 
 	// Annotations copied Certificate -> CertificateRequest,
@@ -122,12 +131,6 @@ const (
 	defaultClusterResourceNamespace = "kube-system"
 	defaultNamespace                = ""
 
-	defaultLeaderElect                 = true
-	defaultLeaderElectionNamespace     = "kube-system"
-	defaultLeaderElectionLeaseDuration = 60 * time.Second
-	defaultLeaderElectionRenewDeadline = 40 * time.Second
-	defaultLeaderElectionRetryPeriod   = 15 * time.Second
-
 	defaultClusterIssuerAmbientCredentials = true
 	defaultIssuerAmbientCredentials        = false
 
@@ -142,6 +145,7 @@ const (
 
 	defaultPrometheusMetricsServerAddress = "0.0.0.0:9402"
 
+	// default time period to wait between checking DNS01 and HTTP01 challenge propagation
 	defaultDNS01CheckRetryPeriod = 10 * time.Second
 )
 
@@ -223,11 +227,11 @@ func NewControllerOptions() *ControllerOptions {
 		KubernetesAPIQPS:                  defaultKubernetesAPIQPS,
 		KubernetesAPIBurst:                defaultKubernetesAPIBurst,
 		Namespace:                         defaultNamespace,
-		LeaderElect:                       defaultLeaderElect,
-		LeaderElectionNamespace:           defaultLeaderElectionNamespace,
-		LeaderElectionLeaseDuration:       defaultLeaderElectionLeaseDuration,
-		LeaderElectionRenewDeadline:       defaultLeaderElectionRenewDeadline,
-		LeaderElectionRetryPeriod:         defaultLeaderElectionRetryPeriod,
+		LeaderElect:                       cmdutil.DefaultLeaderElect,
+		LeaderElectionNamespace:           cmdutil.DefaultLeaderElectionNamespace,
+		LeaderElectionLeaseDuration:       cmdutil.DefaultLeaderElectionLeaseDuration,
+		LeaderElectionRenewDeadline:       cmdutil.DefaultLeaderElectionRenewDeadline,
+		LeaderElectionRetryPeriod:         cmdutil.DefaultLeaderElectionRetryPeriod,
 		controllers:                       defaultEnabledControllers,
 		ClusterIssuerAmbientCredentials:   defaultClusterIssuerAmbientCredentials,
 		IssuerAmbientCredentials:          defaultIssuerAmbientCredentials,
@@ -235,12 +239,14 @@ func NewControllerOptions() *ControllerOptions {
 		DefaultIssuerKind:                 defaultTLSACMEIssuerKind,
 		DefaultIssuerGroup:                defaultTLSACMEIssuerGroup,
 		DefaultAutoCertificateAnnotations: defaultAutoCertificateAnnotations,
+		ACMEHTTP01SolverNameservers:       []string{},
 		DNS01RecursiveNameservers:         []string{},
 		DNS01RecursiveNameserversOnly:     defaultDNS01RecursiveNameserversOnly,
 		EnableCertificateOwnerRef:         defaultEnableCertificateOwnerRef,
 		MetricsListenAddress:              defaultPrometheusMetricsServerAddress,
 		DNS01CheckRetryPeriod:             defaultDNS01CheckRetryPeriod,
-		EnablePprof:                       false,
+		EnablePprof:                       cmdutil.DefaultEnableProfiling,
+		PprofAddress:                      cmdutil.DefaultProfilerAddr,
 	}
 }
 
@@ -258,22 +264,22 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.Namespace, "namespace", defaultNamespace, ""+
 		"If set, this limits the scope of cert-manager to a single namespace and ClusterIssuers are disabled. "+
 		"If not specified, all namespaces will be watched")
-	fs.BoolVar(&s.LeaderElect, "leader-elect", true, ""+
+	fs.BoolVar(&s.LeaderElect, "leader-elect", cmdutil.DefaultLeaderElect, ""+
 		"If true, cert-manager will perform leader election between instances to ensure no more "+
 		"than one instance of cert-manager operates at a time")
-	fs.StringVar(&s.LeaderElectionNamespace, "leader-election-namespace", defaultLeaderElectionNamespace, ""+
+	fs.StringVar(&s.LeaderElectionNamespace, "leader-election-namespace", cmdutil.DefaultLeaderElectionNamespace, ""+
 		"Namespace used to perform leader election. Only used if leader election is enabled")
-	fs.DurationVar(&s.LeaderElectionLeaseDuration, "leader-election-lease-duration", defaultLeaderElectionLeaseDuration, ""+
+	fs.DurationVar(&s.LeaderElectionLeaseDuration, "leader-election-lease-duration", cmdutil.DefaultLeaderElectionLeaseDuration, ""+
 		"The duration that non-leader candidates will wait after observing a leadership "+
 		"renewal until attempting to acquire leadership of a led but unrenewed leader "+
 		"slot. This is effectively the maximum duration that a leader can be stopped "+
 		"before it is replaced by another candidate. This is only applicable if leader "+
 		"election is enabled.")
-	fs.DurationVar(&s.LeaderElectionRenewDeadline, "leader-election-renew-deadline", defaultLeaderElectionRenewDeadline, ""+
+	fs.DurationVar(&s.LeaderElectionRenewDeadline, "leader-election-renew-deadline", cmdutil.DefaultLeaderElectionRenewDeadline, ""+
 		"The interval between attempts by the acting master to renew a leadership slot "+
 		"before it stops leading. This must be less than or equal to the lease duration. "+
 		"This is only applicable if leader election is enabled.")
-	fs.DurationVar(&s.LeaderElectionRetryPeriod, "leader-election-retry-period", defaultLeaderElectionRetryPeriod, ""+
+	fs.DurationVar(&s.LeaderElectionRetryPeriod, "leader-election-retry-period", cmdutil.DefaultLeaderElectionRetryPeriod, ""+
 		"The duration the clients should wait between attempting acquisition and renewal "+
 		"of a leadership. This is only applicable if leader election is enabled.")
 
@@ -284,6 +290,11 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 		"'foo'.\nAll controllers: %s",
 		strings.Join(allControllers, ", ")))
 
+	// HTTP-01 solver pod configuration via flags is a now deprecated
+	// mechanism- please use pod template instead when adding any new
+	// configuration options
+	// https://github.com/cert-manager/cert-manager/blob/f1d7c432763100c3fb6eb6a1654d29060b479b3c/pkg/apis/acme/v1/types_issuer.go#L270
+	// These flags however will not be deprecated for backwards compatibility purposes.
 	fs.StringVar(&s.ACMEHTTP01SolverImage, "acme-http01-solver-image", defaultACMEHTTP01SolverImage, ""+
 		"The docker image to use to solve ACME HTTP01 challenges. You most likely will not "+
 		"need to change this parameter unless you are testing a new feature or developing cert-manager.")
@@ -299,6 +310,11 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&s.ACMEHTTP01SolverResourceLimitsMemory, "acme-http01-solver-resource-limits-memory", defaultACMEHTTP01SolverResourceLimitsMemory, ""+
 		"Defines the resource limits Memory size when spawning new ACME HTTP01 challenge solver pods.")
+
+	fs.StringSliceVar(&s.ACMEHTTP01SolverNameservers, "acme-http01-solver-nameservers",
+		[]string{}, "A list of comma separated dns server endpoints used for "+
+			"ACME HTTP01 check requests. This should be a list containing host and "+
+			"port, for example 8.8.8.8:53,8.8.4.4:53")
 
 	fs.BoolVar(&s.ClusterIssuerAmbientCredentials, "cluster-issuer-ambient-credentials", defaultClusterIssuerAmbientCredentials, ""+
 		"Whether a cluster-issuer may make use of ambient credentials for issuers. 'Ambient Credentials' are credentials drawn from the environment, metadata services, or local files which are not explicitly configured in the ClusterIssuer API object. "+
@@ -328,11 +344,6 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 			"environments, where access to authoritative nameservers is restricted. "+
 			"Enabling this option could cause the DNS01 self check to take longer "+
 			"due to caching performed by the recursive nameservers.")
-	fs.StringSliceVar(&s.DNS01RecursiveNameservers, "dns01-self-check-nameservers",
-		[]string{}, "A list of comma separated dns server endpoints used for "+
-			"DNS01 check requests. This should be a list containing host and port, "+
-			"for example 8.8.8.8:53,8.8.4.4:53")
-	fs.MarkDeprecated("dns01-self-check-nameservers", "Deprecated in favour of dns01-recursive-nameservers")
 
 	fs.BoolVar(&s.EnableCertificateOwnerRef, "enable-certificate-owner-ref", defaultEnableCertificateOwnerRef, ""+
 		"Whether to set the certificate resource as an owner of secret where the tls certificate is stored. "+
@@ -345,21 +356,20 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&s.MaxConcurrentChallenges, "max-concurrent-challenges", defaultMaxConcurrentChallenges, ""+
 		"The maximum number of challenges that can be scheduled as 'processing' at once.")
 	fs.DurationVar(&s.DNS01CheckRetryPeriod, "dns01-check-retry-period", defaultDNS01CheckRetryPeriod, ""+
-		"The duration the controller should wait between checking if a ACME dns entry exists."+
+		"The duration the controller should wait between a propagation check. Despite the name, this flag is used to configure the wait period for both DNS01 and HTTP01 challenge propagation checks. For DNS01 challenges the propagation check verifies that a TXT record with the challenge token has been created. For HTTP01 challenges the propagation check verifies that the challenge token is served at the challenge URL."+
 		"This should be a valid duration string, for example 180s or 1h")
 
 	fs.StringVar(&s.MetricsListenAddress, "metrics-listen-address", defaultPrometheusMetricsServerAddress, ""+
 		"The host and port that the metrics endpoint should listen on.")
-	fs.BoolVar(&s.EnablePprof, "enable-profiling", false, ""+
+	fs.BoolVar(&s.EnablePprof, "enable-profiling", cmdutil.DefaultEnableProfiling, ""+
 		"Enable profiling for controller.")
+	fs.StringVar(&s.PprofAddress, "profiler-address", cmdutil.DefaultProfilerAddr,
+		"The host and port that Go profiler should listen on, i.e localhost:6060. Ensure that profiler is not exposed on a public address. Profiler will be served at /debug/pprof.")
 }
 
 func (o *ControllerOptions) Validate() error {
-	switch o.DefaultIssuerKind {
-	case "Issuer":
-	case "ClusterIssuer":
-	default:
-		return fmt.Errorf("invalid default issuer kind: %v", o.DefaultIssuerKind)
+	if len(o.DefaultIssuerKind) == 0 {
+		return errors.New("the --default-issuer-kind flag must not be empty")
 	}
 
 	if o.KubernetesAPIBurst <= 0 {
@@ -374,7 +384,7 @@ func (o *ControllerOptions) Validate() error {
 		return fmt.Errorf("invalid value for kube-api-burst: %v must be higher or equal to kube-api-qps: %v", o.KubernetesAPIQPS, o.KubernetesAPIQPS)
 	}
 
-	for _, server := range o.DNS01RecursiveNameservers {
+	for _, server := range append(o.DNS01RecursiveNameservers, o.ACMEHTTP01SolverNameservers...) {
 		// ensure all servers have a port number
 		_, _, err := net.SplitHostPort(server)
 		if err != nil {
@@ -422,6 +432,11 @@ func (o *ControllerOptions) EnabledControllers() sets.String {
 	if utilfeature.DefaultFeatureGate.Enabled(feature.ExperimentalCertificateSigningRequestControllers) {
 		logf.Log.Info("enabling all experimental certificatesigningrequest controllers")
 		enabled = enabled.Insert(experimentalCertificateSigningRequestControllers...)
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(feature.ExperimentalGatewayAPISupport) {
+		logf.Log.Info("enabling the sig-network Gateway API certificate-shim and HTTP-01 solver")
+		enabled = enabled.Insert(shimgatewaycontroller.ControllerName)
 	}
 
 	return enabled

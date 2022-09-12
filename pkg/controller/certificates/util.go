@@ -21,6 +21,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+
 	"fmt"
 	"reflect"
 	"time"
@@ -29,16 +32,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
-
-// The amount of time after the LastFailureTime of a Certificate
-// before the request should be retried.
-// In future this should be replaced with a more dynamic exponential
-// back-off algorithm.
-const RetryAfterLastFailure = time.Hour
 
 // PrivateKeyMatchesSpec returns an error if the private key bit size
 // doesn't match the provided spec. RSA, Ed25519 and ECDSA are supported.
@@ -63,7 +60,7 @@ func PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]
 func rsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
 	rsaPk, ok := pk.(*rsa.PrivateKey)
 	if !ok {
-		return []string{"spec.keyAlgorithm"}, nil
+		return []string{"spec.privateKey.algorithm"}, nil
 	}
 	var violations []string
 	// TODO: we should not use implicit defaulting here, and instead rely on
@@ -76,7 +73,7 @@ func rsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) 
 		keySize = spec.PrivateKey.Size
 	}
 	if rsaPk.N.BitLen() != keySize {
-		violations = append(violations, "spec.keySize")
+		violations = append(violations, "spec.privateKey.size")
 	}
 	return violations, nil
 }
@@ -84,7 +81,7 @@ func rsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) 
 func ecdsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
 	ecdsaPk, ok := pk.(*ecdsa.PrivateKey)
 	if !ok {
-		return []string{"spec.keyAlgorithm"}, nil
+		return []string{"spec.privateKey.algorithm"}, nil
 	}
 	var violations []string
 	// TODO: we should not use implicit defaulting here, and instead rely on
@@ -97,7 +94,7 @@ func ecdsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec
 		expectedKeySize = spec.PrivateKey.Size
 	}
 	if expectedKeySize != ecdsaPk.Curve.Params().BitSize {
-		violations = append(violations, "spec.keySize")
+		violations = append(violations, "spec.privateKey.size")
 	}
 	return violations, nil
 }
@@ -105,7 +102,7 @@ func ecdsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec
 func ed25519PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
 	_, ok := pk.(ed25519.PrivateKey)
 	if !ok {
-		return []string{"spec.keyAlgorithm"}, nil
+		return []string{"spec.privateKey.algorithm"}, nil
 	}
 
 	return nil, nil
@@ -128,57 +125,77 @@ func RequestMatchesSpec(req *cmapi.CertificateRequest, spec cmapi.CertificateSpe
 	}
 
 	var violations []string
-	if x509req.Subject.CommonName != spec.CommonName {
-		violations = append(violations, "spec.commonName")
-	}
-	if !util.EqualUnsorted(x509req.DNSNames, spec.DNSNames) {
-		violations = append(violations, "spec.dnsNames")
-	}
-	if !util.EqualUnsorted(pki.IPAddressesToString(x509req.IPAddresses), spec.IPAddresses) {
-		violations = append(violations, "spec.ipAddresses")
-	}
-	if !util.EqualUnsorted(pki.URLsToString(x509req.URIs), spec.URIs) {
-		violations = append(violations, "spec.uris")
-	}
-	if !util.EqualUnsorted(x509req.EmailAddresses, spec.EmailAddresses) {
-		violations = append(violations, "spec.emailAddresses")
-	}
-	if x509req.Subject.SerialNumber != spec.Subject.SerialNumber {
-		violations = append(violations, "spec.subject.serialNumber")
-	}
-	if !util.EqualUnsorted(x509req.Subject.Organization, spec.Subject.Organizations) {
-		violations = append(violations, "spec.subject.organizations")
-	}
-	if !util.EqualUnsorted(x509req.Subject.Country, spec.Subject.Countries) {
-		violations = append(violations, "spec.subject.countries")
-	}
-	if !util.EqualUnsorted(x509req.Subject.Locality, spec.Subject.Localities) {
-		violations = append(violations, "spec.subject.localities")
-	}
-	if !util.EqualUnsorted(x509req.Subject.OrganizationalUnit, spec.Subject.OrganizationalUnits) {
-		violations = append(violations, "spec.subject.organizationalUnits")
-	}
-	if !util.EqualUnsorted(x509req.Subject.PostalCode, spec.Subject.PostalCodes) {
-		violations = append(violations, "spec.subject.postCodes")
-	}
-	if !util.EqualUnsorted(x509req.Subject.Province, spec.Subject.Provinces) {
-		violations = append(violations, "spec.subject.postCodes")
-	}
-	if !util.EqualUnsorted(x509req.Subject.StreetAddress, spec.Subject.StreetAddresses) {
-		violations = append(violations, "spec.subject.streetAddresses")
-	}
-	if req.Spec.IsCA != spec.IsCA {
-		violations = append(violations, "spec.isCA")
-	}
-	if !util.EqualKeyUsagesUnsorted(req.Spec.Usages, spec.Usages) {
-		violations = append(violations, "spec.usages")
-	}
-	if spec.Duration != nil && req.Spec.Duration != nil &&
-		spec.Duration.Duration != req.Spec.Duration.Duration {
-		violations = append(violations, "spec.duration")
-	}
-	if !reflect.DeepEqual(spec.IssuerRef, req.Spec.IssuerRef) {
-		violations = append(violations, "spec.issuerRef")
+	if spec.LiteralSubject == "" {
+		if x509req.Subject.CommonName != spec.CommonName {
+			violations = append(violations, "spec.commonName")
+		}
+		if !util.EqualUnsorted(x509req.DNSNames, spec.DNSNames) {
+			violations = append(violations, "spec.dnsNames")
+		}
+		if !util.EqualUnsorted(pki.IPAddressesToString(x509req.IPAddresses), spec.IPAddresses) {
+			violations = append(violations, "spec.ipAddresses")
+		}
+		if !util.EqualUnsorted(pki.URLsToString(x509req.URIs), spec.URIs) {
+			violations = append(violations, "spec.uris")
+		}
+		if !util.EqualUnsorted(x509req.EmailAddresses, spec.EmailAddresses) {
+			violations = append(violations, "spec.emailAddresses")
+		}
+		if x509req.Subject.SerialNumber != spec.Subject.SerialNumber {
+			violations = append(violations, "spec.subject.serialNumber")
+		}
+		if !util.EqualUnsorted(x509req.Subject.Organization, spec.Subject.Organizations) {
+			violations = append(violations, "spec.subject.organizations")
+		}
+		if !util.EqualUnsorted(x509req.Subject.Country, spec.Subject.Countries) {
+			violations = append(violations, "spec.subject.countries")
+		}
+		if !util.EqualUnsorted(x509req.Subject.Locality, spec.Subject.Localities) {
+			violations = append(violations, "spec.subject.localities")
+		}
+		if !util.EqualUnsorted(x509req.Subject.OrganizationalUnit, spec.Subject.OrganizationalUnits) {
+			violations = append(violations, "spec.subject.organizationalUnits")
+		}
+		if !util.EqualUnsorted(x509req.Subject.PostalCode, spec.Subject.PostalCodes) {
+			violations = append(violations, "spec.subject.postCodes")
+		}
+		if !util.EqualUnsorted(x509req.Subject.Province, spec.Subject.Provinces) {
+			violations = append(violations, "spec.subject.postCodes")
+		}
+		if !util.EqualUnsorted(x509req.Subject.StreetAddress, spec.Subject.StreetAddresses) {
+			violations = append(violations, "spec.subject.streetAddresses")
+		}
+		if req.Spec.IsCA != spec.IsCA {
+			violations = append(violations, "spec.isCA")
+		}
+		if !util.EqualKeyUsagesUnsorted(req.Spec.Usages, spec.Usages) {
+			violations = append(violations, "spec.usages")
+		}
+		if spec.Duration != nil && req.Spec.Duration != nil &&
+			spec.Duration.Duration != req.Spec.Duration.Duration {
+			violations = append(violations, "spec.duration")
+		}
+		if !reflect.DeepEqual(spec.IssuerRef, req.Spec.IssuerRef) {
+			violations = append(violations, "spec.issuerRef")
+		}
+	} else {
+		// we have a LiteralSubject
+		// parse the subject of the csr in the same way as we parse LiteralSubject and see whether the RDN Sequences match
+
+		var rdnSequenceFromCertificateRequest pkix.RDNSequence
+		_, err2 := asn1.Unmarshal(x509req.RawSubject, &rdnSequenceFromCertificateRequest)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		rdnSequenceFromCertificate, err := pki.ParseSubjectStringToRdnSequence(spec.LiteralSubject)
+		if err != nil {
+			return nil, err
+		}
+
+		if !reflect.DeepEqual(rdnSequenceFromCertificate, rdnSequenceFromCertificateRequest) {
+			violations = append(violations, "spec.literalSubject")
+		}
 	}
 
 	return violations, nil
@@ -283,7 +300,7 @@ func GenerateLocallySignedTemporaryCertificate(crt *cmapi.Certificate, pkData []
 	return b, nil
 }
 
-//RenewalTimeFunc is a custom function type for calculating renewal time of a certificate.
+// RenewalTimeFunc is a custom function type for calculating renewal time of a certificate.
 type RenewalTimeFunc func(time.Time, time.Time, *metav1.Duration) *metav1.Time
 
 // RenewalTime calculates renewal time for a certificate. Default renewal time
@@ -307,6 +324,16 @@ func RenewalTime(notBefore, notAfter time.Time, renewBeforeOverride *metav1.Dura
 
 	// 2. Calculate when a cert should be renewed
 
-	rt := metav1.NewTime(notAfter.Add(-1 * renewBefore))
+	// Truncate the renewal time to nearest second. This is important
+	// because the renewal time also gets stored on Certificate's status
+	// where it is truncated to the nearest second. We use the renewal time
+	// from Certificate's status to determine when the Certificate will be
+	// added to the queue to be renewed, but then re-calculate whether it
+	// needs to be renewed _now_ using this function- so returning a
+	// non-truncated value here would potentially cause Certificates to be
+	// re-queued for renewal earlier than the calculated renewal time thus
+	// causing Certificates to not be automatically renewed. See
+	// https://github.com/cert-manager/cert-manager/pull/4399.
+	rt := metav1.NewTime(notAfter.Add(-1 * renewBefore).Truncate(time.Second))
 	return &rt
 }

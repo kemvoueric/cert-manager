@@ -18,15 +18,18 @@ package clusterissuers
 
 import (
 	"context"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/errors"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalissuers "github.com/cert-manager/cert-manager/internal/controller/issuers"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/globals"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 const (
@@ -38,13 +41,12 @@ const (
 func (c *controller) Sync(ctx context.Context, iss *cmapi.ClusterIssuer) (err error) {
 	log := logf.FromContext(ctx)
 
-	// allow a maximum of 10s
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	ctx, cancel := context.WithTimeout(ctx, globals.DefaultControllerContextTimeout)
 	defer cancel()
 
 	issuerCopy := iss.DeepCopy()
 	defer func() {
-		if _, saveErr := c.updateIssuerStatus(ctx, iss, issuerCopy); saveErr != nil {
+		if saveErr := c.updateIssuerStatus(ctx, iss, issuerCopy); saveErr != nil {
 			err = errors.NewAggregate([]error{saveErr, err})
 		}
 	}()
@@ -65,9 +67,14 @@ func (c *controller) Sync(ctx context.Context, iss *cmapi.ClusterIssuer) (err er
 	return nil
 }
 
-func (c *controller) updateIssuerStatus(ctx context.Context, old, new *cmapi.ClusterIssuer) (*cmapi.ClusterIssuer, error) {
+func (c *controller) updateIssuerStatus(ctx context.Context, old, new *cmapi.ClusterIssuer) error {
 	if apiequality.Semantic.DeepEqual(old.Status, new.Status) {
-		return nil, nil
+		return nil
 	}
-	return c.cmClient.CertmanagerV1().ClusterIssuers().UpdateStatus(ctx, new, metav1.UpdateOptions{})
+	if utilfeature.DefaultFeatureGate.Enabled(feature.ServerSideApply) {
+		return internalissuers.ApplyClusterIssuerStatus(ctx, c.cmClient, c.fieldManager, new)
+	} else {
+		_, err := c.cmClient.CertmanagerV1().ClusterIssuers().UpdateStatus(ctx, new, metav1.UpdateOptions{})
+		return err
+	}
 }

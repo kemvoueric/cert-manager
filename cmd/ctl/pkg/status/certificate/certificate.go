@@ -27,38 +27,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
-	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/reference"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1beta1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	"github.com/jetstack/cert-manager/pkg/ctl"
-	"github.com/jetstack/cert-manager/pkg/util/predicate"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/factory"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	"github.com/cert-manager/cert-manager/pkg/ctl"
+	"github.com/cert-manager/cert-manager/pkg/util/predicate"
 )
 
 var (
 	long = templates.LongDesc(i18n.T(`
 Get details about the current status of a cert-manager Certificate resource, including information on related resources like CertificateRequest or Order.`))
 
-	example = templates.Examples(i18n.T(`
+	example = templates.Examples(i18n.T(build.WithTemplate(`
 # Query status of Certificate with name 'my-crt' in namespace 'my-namespace'
-kubectl cert-manager status certificate my-crt --namespace my-namespace
-`))
+{{.BuildName}} status certificate my-crt --namespace my-namespace
+`)))
 )
 
 // Options is a struct to support status certificate command
 type Options struct {
-	CMClient   cmclient.Interface
-	RESTConfig *restclient.Config
-	// The Namespace that the Certificate to be queried about resides in.
-	// This flag registration is handled by cmdutil.Factory
-	Namespace string
-
 	genericclioptions.IOStreams
+	*factory.Factory
 }
 
 // Data is a struct containing the information to build a CertificateStatus
@@ -89,19 +85,23 @@ func NewOptions(ioStreams genericclioptions.IOStreams) *Options {
 }
 
 // NewCmdStatusCert returns a cobra command for status certificate
-func NewCmdStatusCert(ctx context.Context, ioStreams genericclioptions.IOStreams, factory cmdutil.Factory) *cobra.Command {
+func NewCmdStatusCert(ctx context.Context, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := NewOptions(ioStreams)
+
 	cmd := &cobra.Command{
-		Use:     "certificate",
-		Short:   "Get details about the current status of a cert-manager Certificate resource",
-		Long:    long,
-		Example: example,
+		Use:               "certificate",
+		Short:             "Get details about the current status of a cert-manager Certificate resource",
+		Long:              long,
+		Example:           example,
+		ValidArgsFunction: factory.ValidArgsListCertificates(ctx, &o.Factory),
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Validate(args))
-			cmdutil.CheckErr(o.Complete(factory))
 			cmdutil.CheckErr(o.Run(ctx, args))
 		},
 	}
+
+	o.Factory = factory.New(ctx, cmd)
+
 	return cmd
 }
 
@@ -113,28 +113,6 @@ func (o *Options) Validate(args []string) error {
 	if len(args) > 1 {
 		return errors.New("only one argument can be passed in: the name of the Certificate")
 	}
-	return nil
-}
-
-// Complete takes the factory and infers any remaining options.
-func (o *Options) Complete(f cmdutil.Factory) error {
-	var err error
-
-	o.Namespace, _, err = f.ToRawKubeConfigLoader().Namespace()
-	if err != nil {
-		return err
-	}
-
-	o.RESTConfig, err = f.ToRESTConfig()
-	if err != nil {
-		return err
-	}
-
-	o.CMClient, err = cmclient.NewForConfig(o.RESTConfig)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -349,7 +327,7 @@ func findMatchingCR(cmClient cmclient.Interface, ctx context.Context, crt *cmapi
 // If one found returns the Order
 // If multiple found or error occurs when listing Orders, returns error
 func findMatchingOrder(cmClient cmclient.Interface, ctx context.Context, req *cmapi.CertificateRequest) (*cmacme.Order, error) {
-	orders, err := cmClient.AcmeV1beta1().Orders(req.Namespace).List(ctx, metav1.ListOptions{})
+	orders, err := cmClient.AcmeV1().Orders(req.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +377,7 @@ func getGenericIssuer(cmClient cmclient.Interface, ctx context.Context, crt *cma
 // findMatchingChallenges tries to find Challenges that are owned by order.
 // If none found returns empty slice.
 func findMatchingChallenges(cmClient cmclient.Interface, ctx context.Context, order *cmacme.Order) ([]*cmacme.Challenge, error) {
-	challenges, err := cmClient.AcmeV1beta1().Challenges(order.Namespace).List(ctx, metav1.ListOptions{})
+	challenges, err := cmClient.AcmeV1().Challenges(order.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}

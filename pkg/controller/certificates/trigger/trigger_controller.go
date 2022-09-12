@@ -18,6 +18,8 @@ package trigger
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -32,21 +34,30 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	cmlisters "github.com/jetstack/cert-manager/pkg/client/listers/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/trigger/policies"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/scheduler"
-	"github.com/jetstack/cert-manager/pkg/util/predicate"
+	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
+	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/scheduler"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
+	"github.com/cert-manager/cert-manager/pkg/util/predicate"
 )
 
-const ControllerName = "certificates-trigger"
+const (
+	ControllerName = "certificates-trigger"
+	// stopIncreaseBackoff is the number of issuance attempts after which the backoff period should stop to increase
+	stopIncreaseBackoff = 6 // 2 ^ (6 - 1) = 32 = maxDelay
+	// maxDelay is the maximum backoff period
+	maxDelay = 32 * time.Hour
+)
 
 // This controller observes the state of the certificate's currently
 // issued `spec.secretName` and the rest of the `certificate.spec` fields to
@@ -60,6 +71,11 @@ type controller struct {
 	client                   cmclient.Interface
 	recorder                 record.EventRecorder
 	scheduledWorkQueue       scheduler.ScheduledWorkQueue
+
+	// fieldManager is the string which will be used as the Field Manager on
+	// fields created or edited by the cert-manager Kubernetes client during
+	// Apply API calls.
+	fieldManager string
 
 	// The following are used for testing purposes.
 	clock              clock.Clock
@@ -75,6 +91,7 @@ func NewController(
 	recorder record.EventRecorder,
 	clock clock.Clock,
 	shouldReissue policies.Func,
+	fieldManager string,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
@@ -112,6 +129,7 @@ func NewController(
 		client:                   client,
 		recorder:                 recorder,
 		scheduledWorkQueue:       scheduler.NewScheduledWorkQueue(clock, queue.Add),
+		fieldManager:             fieldManager,
 
 		// The following are used for testing purposes.
 		clock:         clock,
@@ -124,13 +142,6 @@ func NewController(
 }
 
 func (c *controller) ProcessItem(ctx context.Context, key string) error {
-	// We don't want to leak goroutines, so let's remove this key from the
-	// scheduled queue in case it has been scheduled. We only need to
-	// un-schedule the key for 'Deleted' events, but ProcessItem does not allow
-	// us to distinguish between 'Added', 'Updated' and 'Deleted'. Note that
-	// there is no unit test around this.
-	c.scheduledWorkQueue.Forget(key)
-
 	log := logf.FromContext(ctx).WithValues("key", key)
 	ctx = logf.NewContext(ctx, log)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -141,7 +152,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 
 	crt, err := c.certificateLister.Certificates(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
-		log.Error(err, "certificate not found for key")
+		log.V(logf.DebugLevel).Info("certificate not found for key", "error", err.Error())
 		return nil
 	}
 	if err != nil {
@@ -160,11 +171,12 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return err
 	}
 
-	// Back off from re-issuing immediately when the certificate has been
-	// in failing mode for less than 1 hour.
+	// Don't trigger issuance if we need to back off due to previous failures and Certificate's spec has not changed.
 	backoff, delay := shouldBackoffReissuingOnFailure(log, c.clock, input.Certificate, input.NextRevisionRequest)
 	if backoff {
-		log.V(logf.InfoLevel).Info("Not re-issuing certificate as an attempt has been made in the last hour", "retry_delay", delay)
+		nextIssuanceRetry := c.clock.Now().Add(delay)
+		message := fmt.Sprintf("Backing off from issuance due to previously failed issuance(s). Issuance will next be attempted at %v", nextIssuanceRetry)
+		log.V(logf.InfoLevel).Info(message)
 		c.scheduleRecheckOfCertificateIfRequired(log, key, delay)
 		return nil
 	}
@@ -189,8 +201,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 
 	crt = crt.DeepCopy()
 	apiutil.SetCertificateCondition(crt, crt.Generation, cmapi.CertificateConditionIssuing, cmmeta.ConditionTrue, reason, message)
-	_, err = c.client.CertmanagerV1().Certificates(crt.Namespace).UpdateStatus(ctx, crt, metav1.UpdateOptions{})
-	if err != nil {
+	if err := c.updateOrApplyStatus(ctx, crt); err != nil {
 		return err
 	}
 	c.recorder.Event(crt, corev1.EventTypeNormal, "Issuing", message)
@@ -198,14 +209,38 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 	return nil
 }
 
-// shouldBackoffReissuingOnFailure tells us if we should back-off re-issuing for
-// an hour or not. Notably, it returns no back-off when the certificate doesn't
+// updateOrApplyStatus will update the controller status. If the
+// ServerSideApply feature is enabled, the managed fields will instead get
+// applied using the relevant Patch API call.
+func (c *controller) updateOrApplyStatus(ctx context.Context, crt *cmapi.Certificate) error {
+	if utilfeature.DefaultFeatureGate.Enabled(feature.ServerSideApply) {
+		var conditions []cmapi.CertificateCondition
+		if cond := apiutil.GetCertificateCondition(crt, cmapi.CertificateConditionIssuing); cond != nil {
+			conditions = []cmapi.CertificateCondition{*cond}
+		}
+		return internalcertificates.ApplyStatus(ctx, c.client, c.fieldManager, &cmapi.Certificate{
+			ObjectMeta: metav1.ObjectMeta{Namespace: crt.Namespace, Name: crt.Name},
+			Status:     cmapi.CertificateStatus{Conditions: conditions},
+		})
+	} else {
+		_, err := c.client.CertmanagerV1().Certificates(crt.Namespace).UpdateStatus(ctx, crt, metav1.UpdateOptions{})
+		return err
+	}
+}
+
+// shouldBackOffReissuingOnFailure returns true if an issuance needs to be
+// delayed and the required delay after calculating the exponential backoff.
+// The backoff periods are 1h, 2h, 4h, 8h, 16h and 32h counting from when the last
+// failure occured,
+// so the returned delay will be backoff_period - (current_time - last_failure_time)
+//
+// Notably, it returns no back-off when the certificate doesn't
 // match the "next" certificate (since a mismatch means that this certificate
 // gets re-issued immediately).
 //
 // Note that the request can be left nil: in that case, the returned back-off
 // will be 0 since it means the CR must be created immediately.
-func shouldBackoffReissuingOnFailure(log logr.Logger, c clock.Clock, crt *cmapi.Certificate, nextCR *cmapi.CertificateRequest) (backoff bool, delay time.Duration) {
+func shouldBackoffReissuingOnFailure(log logr.Logger, c clock.Clock, crt *cmapi.Certificate, nextCR *cmapi.CertificateRequest) (bool, time.Duration) {
 	if crt.Status.LastFailureTime == nil {
 		return false, 0
 	}
@@ -236,11 +271,40 @@ func shouldBackoffReissuingOnFailure(log logr.Logger, c clock.Clock, crt *cmapi.
 
 	now := c.Now()
 	durationSinceFailure := now.Sub(crt.Status.LastFailureTime.Time)
-	if durationSinceFailure >= certificates.RetryAfterLastFailure {
+
+	initialDelay := time.Hour
+	delay := initialDelay
+	failedIssuanceAttempts := 0
+	// It is possible that crt.Status.LastFailureTime != nil &&
+	// crt.Status.FailedIssuanceAttempts == nil (in case of the Certificate having
+	// failed for an installation of cert-manager before the issuance
+	// attempts were introduced). In such case delay = initialDelay.
+	if crt.Status.FailedIssuanceAttempts != nil {
+		failedIssuanceAttempts = *crt.Status.FailedIssuanceAttempts
+		delay = time.Hour * time.Duration(math.Pow(2, float64(failedIssuanceAttempts-1)))
+	}
+
+	// Ensure that maximum returned delay is 32 hours
+	// delay cannot be calculated for large issuance numbers, so we
+	// cannot reliably check if delay > maxDelay directly
+	// (see i.e the result of time.Duration(math.Pow(2, 99)))
+	if failedIssuanceAttempts > stopIncreaseBackoff {
+		delay = maxDelay
+	}
+
+	// Ensure that minimum returned delay is 1 hour. This is here to guard
+	// against an edge case where the delay duration got messed
+	// up as a result of maths misuse in the previous calculations
+	if delay < initialDelay {
+		delay = initialDelay
+	}
+
+	if durationSinceFailure >= delay {
 		log.V(logf.ExtendedInfoLevel).WithValues("since_failure", durationSinceFailure).Info("Certificate has been in failure state long enough, no need to back off")
 		return false, 0
 	}
-	return true, certificates.RetryAfterLastFailure - durationSinceFailure
+
+	return true, delay - durationSinceFailure
 }
 
 // scheduleRecheckOfCertificateIfRequired will schedule the resource with the
@@ -281,6 +345,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 		ctx.Recorder,
 		ctx.Clock,
 		policies.NewTriggerPolicyChain(ctx.Clock).Evaluate,
+		ctx.FieldManager,
 	)
 	c.controller = ctrl
 
@@ -288,7 +353,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 }
 
 func init() {
-	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, ControllerName).
 			For(&controllerWrapper{}).
 			Complete()

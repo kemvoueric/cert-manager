@@ -20,16 +20,16 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmutil "github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	vaddon "github.com/jetstack/cert-manager/test/e2e/framework/addon/venafi"
-	"github.com/jetstack/cert-manager/test/e2e/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	cmutil "github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	vaddon "github.com/cert-manager/cert-manager/test/e2e/framework/addon/venafi"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
 )
 
 var _ = TPPDescribe("Certificate with a properly configured Issuer", func() {
@@ -75,19 +75,19 @@ var _ = TPPDescribe("Certificate with a properly configured Issuer", func() {
 	It("should obtain a signed certificate for a single domain", func() {
 		certClient := f.CertManagerClientSet.CertmanagerV1().Certificates(f.Namespace.Name)
 
-		crt := util.NewCertManagerBasicCertificate(certificateName, certificateSecretName, issuer.Name, cmapi.IssuerKind, nil, nil)
-		crt.Spec.CommonName = cmutil.RandStringRunes(10) + ".venafi-e2e.example"
+		cert := util.NewCertManagerBasicCertificate(certificateName, certificateSecretName, issuer.Name, cmapi.IssuerKind, nil, nil)
+		cert.Spec.CommonName = cmutil.RandStringRunes(10) + ".venafi-e2e.example"
 
 		By("Creating a Certificate")
-		_, err := certClient.Create(context.TODO(), crt, metav1.CreateOptions{})
+		cert, err := certClient.Create(context.TODO(), cert, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Waiting for the Certificate to be issued...")
-		_, err = f.Helper().WaitForCertificateReady(f.Namespace.Name, certificateName, time.Minute*5)
+		cert, err = f.Helper().WaitForCertificateReadyAndDoneIssuing(cert, time.Minute*5)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Validating the issued Certificate...")
-		err = f.Helper().ValidateCertificate(f.Namespace.Name, certificateName)
+		err = f.Helper().ValidateCertificate(cert)
 		Expect(err).NotTo(HaveOccurred())
 	})
 })

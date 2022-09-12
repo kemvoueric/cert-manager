@@ -38,16 +38,17 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests"
-	"github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/util"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
-	testlisters "github.com/jetstack/cert-manager/test/unit/listers"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/util"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
+	testlisters "github.com/cert-manager/cert-manager/test/unit/listers"
 )
 
 var (
@@ -217,7 +218,7 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
-		"an approved CSR but the private key references a Secret that does not exist should mark as failed": {
+		"an approved CSR but the private key references a Secret that does not exist should fire an event and return error": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
 					Type:   certificatesv1.CertificateApproved,
@@ -257,32 +258,11 @@ func TestProcessItem(t *testing.T) {
 							},
 						},
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						certificatesv1.SchemeGroupVersion.WithResource("certificatesigningrequests"),
-						"status",
-						"",
-						gen.CertificateSigningRequestFrom(baseCSR.DeepCopy(),
-							gen.AddCertificateSigningRequestAnnotations(map[string]string{
-								"experimental.cert-manager.io/private-key-secret-name": "test-secret",
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:   certificatesv1.CertificateApproved,
-								Status: corev1.ConditionTrue,
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:               certificatesv1.CertificateFailed,
-								Status:             corev1.ConditionTrue,
-								Reason:             "SecretNotFound",
-								Message:            `Referenced Secret default-unit-test-ns/test-secret not found`,
-								LastTransitionTime: metaFixedClockStart,
-								LastUpdateTime:     metaFixedClockStart,
-							}),
-						),
-					)),
 				},
 			},
+			expectedErr: false,
 		},
-		"an approved CSR but the private key references a Secret that contains bad data should be marked as failed": {
+		"an approved CSR but the private key references a Secret that contains bad data should fire warning event.": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
 					Type:   certificatesv1.CertificateApproved,
@@ -332,28 +312,6 @@ func TestProcessItem(t *testing.T) {
 								},
 							},
 						},
-					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						certificatesv1.SchemeGroupVersion.WithResource("certificatesigningrequests"),
-						"status",
-						"",
-						gen.CertificateSigningRequestFrom(baseCSR.DeepCopy(),
-							gen.AddCertificateSigningRequestAnnotations(map[string]string{
-								"experimental.cert-manager.io/private-key-secret-name": "test-secret",
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:   certificatesv1.CertificateApproved,
-								Status: corev1.ConditionTrue,
-							}),
-							gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
-								Type:               certificatesv1.CertificateFailed,
-								Status:             corev1.ConditionTrue,
-								Reason:             "ErrorParsingKey",
-								Message:            "Failed to parse signing key from secret default-unit-test-ns/test-secret",
-								LastTransitionTime: metaFixedClockStart,
-								LastUpdateTime:     metaFixedClockStart,
-							}),
-						),
 					)),
 				},
 			},
@@ -655,7 +613,7 @@ func TestProcessItem(t *testing.T) {
 
 			defer test.builder.Stop()
 
-			selfsigned := NewSelfSigned(test.builder.Context)
+			selfsigned := NewSelfSigned(test.builder.Context).(*SelfSigned)
 
 			if test.fakeLister != nil {
 				selfsigned.secretsLister = test.fakeLister
@@ -665,7 +623,10 @@ func TestProcessItem(t *testing.T) {
 				selfsigned.signingFn = test.signingFn
 			}
 
-			controller := certificatesigningrequests.New(apiutil.IssuerSelfSigned, selfsigned)
+			controller := certificatesigningrequests.New(
+				apiutil.IssuerSelfSigned,
+				func(*controller.Context) certificatesigningrequests.Signer { return selfsigned },
+			)
 			controller.Register(test.builder.Context)
 			test.builder.Start()
 
@@ -722,8 +683,43 @@ func TestSign(t *testing.T) {
 				// Note that we do have a plan to fix this. We want to be
 				// injecting a time (instead of time.Now) to the template
 				// functions. This work is being tracked in this issue:
-				// https://github.com/jetstack/cert-manager/issues/3738
+				// https://github.com/cert-manager/cert-manager/issues/3738
 				expectNotAfter := time.Now().UTC().Add(30 * time.Minute)
+				deltaSec := math.Abs(expectNotAfter.Sub(got.NotAfter).Seconds())
+				assert.LessOrEqualf(t, deltaSec, 2., "expected a time delta lower than 2 second. Time expected='%s', got='%s'", expectNotAfter.String(), got.NotAfter.String())
+			},
+		},
+		"when the CertificateSigningRequest has the expiration seconds field set, it should appear as notAfter on the signed certificate": {
+			csr: gen.CertificateSigningRequest("csr-1",
+				gen.AddCertificateSigningRequestAnnotations(map[string]string{
+					"experimental.cert-manager.io/private-key-secret-name": "test-secret",
+				}),
+				gen.SetCertificateSigningRequestSignerName("issuers.cert-manager.io/default-unit-test-ns.issuer-1"),
+				gen.SetCertificateSigningRequestExpirationSeconds(444),
+				gen.SetCertificateSigningRequestRequest(csrBundle.csrPEM),
+			),
+			issuer: baseIssuer,
+			assertSignedCert: func(t *testing.T, got *x509.Certificate) {
+				// Although there is less than 1µs between the time.Now
+				// call made by the certificate template func (in the "pki"
+				// package) and the time.Now below, rounding or truncating
+				// will always end up with a flaky test. This is due to the
+				// rounding made to the notAfter value when serializing the
+				// certificate to ASN.1 [1].
+				//
+				//  [1]: https://tools.ietf.org/html/rfc5280#section-4.1.2.5.1
+				//
+				// So instead of using a truncation or rounding in order to
+				// check the time, we use a delta of 2 seconds. One entire
+				// second is totally overkill since, as detailed above, the
+				// delay is probably less than a microsecond. But that will
+				// do for now!
+				//
+				// Note that we do have a plan to fix this. We want to be
+				// injecting a time (instead of time.Now) to the template
+				// functions. This work is being tracked in this issue:
+				// https://github.com/cert-manager/cert-manager/issues/3738
+				expectNotAfter := time.Now().UTC().Add(444 * time.Second)
 				deltaSec := math.Abs(expectNotAfter.Sub(got.NotAfter).Seconds())
 				assert.LessOrEqualf(t, deltaSec, 2., "expected a time delta lower than 2 second. Time expected='%s', got='%s'", expectNotAfter.String(), got.NotAfter.String())
 			},

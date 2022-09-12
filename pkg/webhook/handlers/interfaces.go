@@ -21,29 +21,21 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
-	"k8s.io/client-go/kubernetes"
 )
 
 type ValidatingAdmissionHook interface {
 	// Validate is called to decide whether to accept the admission request. The returned AdmissionResponse
 	// must not use the Patch field.
 	Validate(ctx context.Context, admissionSpec *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse
-
-	// InitPlugins will initialise all plugins which are registered for this
-	// validating admission hook.
-	InitPlugins(client kubernetes.Interface)
 }
 
 type MutatingAdmissionHook interface {
-	// Admit is called to decide whether to accept the admission request. The returned AdmissionResponse may
+	// Mutate is called to decide whether to accept the admission request. The returned AdmissionResponse may
 	// use the Patch field to mutate the object from the passed AdmissionRequest.
 	Mutate(ctx context.Context, admissionSpec *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse
 }
 
 type ConversionHook interface {
-	// ConvertV1 is called to convert a resource in one version into a different version.
-	ConvertV1(conversionSpec *apiextensionsv1.ConversionRequest) *apiextensionsv1.ConversionResponse
-	// ConvertV1beta1 is called to convert a resource in one version into a different version.
-	ConvertV1Beta1(conversionSpec *apiextensionsv1beta1.ConversionRequest) *apiextensionsv1beta1.ConversionResponse
+	// Convert is called to convert a resource in one version into a different version.
+	Convert(conversionSpec *apiextensionsv1.ConversionRequest) *apiextensionsv1.ConversionResponse
 }

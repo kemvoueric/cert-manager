@@ -24,14 +24,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"golang.org/x/crypto/ocsp"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 )
 
 func fingerprintCert(cert *x509.Certificate) string {
@@ -78,7 +78,7 @@ func checkOCSPValidCert(leafCert, issuerCert *x509.Certificate) (bool, error) {
 			return false, fmt.Errorf("error making HTTP request: %w", err)
 		}
 		defer httpResponse.Body.Close()
-		output, err := ioutil.ReadAll(httpResponse.Body)
+		output, err := io.ReadAll(httpResponse.Body)
 		if err != nil {
 			return false, fmt.Errorf("error reading HTTP body: %w", err)
 		}
@@ -102,7 +102,7 @@ func checkCRLValidCert(cert *x509.Certificate, url string) (bool, error) {
 		return false, fmt.Errorf("error getting HTTP response: %w", err)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, fmt.Errorf("error reading HTTP body: %w", err)
 	}

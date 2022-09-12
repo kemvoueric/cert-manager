@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,10 +29,17 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/http/solver"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/http/solver"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+)
+
+const (
+	// annotationIngressClass is the well-known annotation key
+	// for specifying ingress classes. It is currently not specified
+	// in the networking/v1 package, so it is duplicated here
+	// to avoid an extra import of networking/v1beta1.
+	annotationIngressClass = "kubernetes.io/ingress.class"
 )
 
 // getIngressesForChallenge returns a list of Ingresses that were created to solve
@@ -73,7 +81,7 @@ func (s *Solver) getIngressesForChallenge(ctx context.Context, ch *cmacme.Challe
 // that the ingress has an appropriate challenge path configured
 func (s *Solver) ensureIngress(ctx context.Context, ch *cmacme.Challenge, svcName string) (ing *networkingv1.Ingress, err error) {
 	log := logf.FromContext(ctx).WithName("ensureIngress")
-	httpDomainCfg, err := httpDomainCfgForChallenge(ch)
+	httpDomainCfg, err := http01IngressCfgForChallenge(ch)
 	if err != nil {
 		return nil, err
 	}
@@ -130,17 +138,13 @@ func (s *Solver) createIngress(ctx context.Context, ch *cmacme.Challenge, svcNam
 		ing = s.mergeIngressObjectMetaWithIngressResourceTemplate(ing, ch.Spec.Solver.HTTP01.Ingress.IngressTemplate)
 	}
 
-	return s.ingressCreateUpdater.Ingresses(ch.Namespace).Create(ctx, ing, metav1.CreateOptions{})
+	return s.Client.NetworkingV1().Ingresses(ch.Namespace).Create(ctx, ing, metav1.CreateOptions{})
 }
 
 func buildIngressResource(ch *cmacme.Challenge, svcName string) (*networkingv1.Ingress, error) {
-	httpDomainCfg, err := httpDomainCfgForChallenge(ch)
+	http01IngressCfg, err := http01IngressCfgForChallenge(ch)
 	if err != nil {
 		return nil, err
-	}
-	var ingClass *string
-	if httpDomainCfg.Class != nil {
-		ingClass = httpDomainCfg.Class
 	}
 
 	podLabels := podLabels(ch)
@@ -150,8 +154,13 @@ func buildIngressResource(ch *cmacme.Challenge, svcName string) (*networkingv1.I
 	// TODO: Figure out how to remove this without breaking users who depend on it.
 	ingAnnotations["nginx.ingress.kubernetes.io/whitelist-source-range"] = "0.0.0.0/0,::/0"
 
-	if ingClass != nil {
-		ingAnnotations[cmapi.IngressClassAnnotationKey] = *ingClass
+	// Use the Ingress Class annotation defined in networkingv1beta1 even though our Ingress objects
+	// are networkingv1, for maximum compatibility with all Ingress controllers.
+	// if the `kubernetes.io/ingress.class` annotation is present, it takes precedence over the
+	// `spec.IngressClassName` field.
+	// See discussion in https://github.com/cert-manager/cert-manager/issues/4537.
+	if http01IngressCfg.Class != nil {
+		ingAnnotations[annotationIngressClass] = *http01IngressCfg.Class
 	}
 
 	ingPathToAdd := ingressPath(ch.Spec.Token, svcName)
@@ -170,6 +179,8 @@ func buildIngressResource(ch *cmacme.Challenge, svcName string) (*networkingv1.I
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ch, challengeGvk)},
 		},
 		Spec: networkingv1.IngressSpec{
+			// https://github.com/cert-manager/cert-manager/issues/4537
+			IngressClassName: nil,
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: httpHost,
@@ -205,6 +216,11 @@ func (s *Solver) mergeIngressObjectMetaWithIngressResourceTemplate(ingress *netw
 	}
 
 	for k, v := range ingressTempl.Annotations {
+		// check if the user set the whitelist-source-range annotation in the template
+		annotation := k[strings.LastIndex(k, "/")+1:]
+		if annotation == "whitelist-source-range" {
+			delete(ingress.Annotations, "nginx.ingress.kubernetes.io/whitelist-source-range")
+		}
 		ingress.Annotations[k] = v
 	}
 
@@ -212,7 +228,7 @@ func (s *Solver) mergeIngressObjectMetaWithIngressResourceTemplate(ingress *netw
 }
 
 func (s *Solver) addChallengePathToIngress(ctx context.Context, ch *cmacme.Challenge, svcName string) (*networkingv1.Ingress, error) {
-	httpDomainCfg, err := httpDomainCfgForChallenge(ch)
+	httpDomainCfg, err := http01IngressCfgForChallenge(ch)
 	if err != nil {
 		return nil, err
 	}
@@ -240,11 +256,11 @@ func (s *Solver) addChallengePathToIngress(ctx context.Context, ch *cmacme.Chall
 						return ing, nil
 					}
 					rule.HTTP.Paths[i] = ingPathToAdd
-					return s.ingressCreateUpdater.Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
+					return s.Client.NetworkingV1().Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
 				}
 			}
 			rule.HTTP.Paths = append([]networkingv1.HTTPIngressPath{ingPathToAdd}, rule.HTTP.Paths...)
-			return s.ingressCreateUpdater.Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
+			return s.Client.NetworkingV1().Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
 		}
 	}
 
@@ -257,16 +273,20 @@ func (s *Solver) addChallengePathToIngress(ctx context.Context, ch *cmacme.Chall
 			},
 		},
 	})
-	return s.ingressCreateUpdater.Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
+	return s.Client.NetworkingV1().Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
 }
 
 // cleanupIngresses will remove the rules added by cert-manager to an existing
 // ingress, or delete the ingress if an existing ingress name is not specified
 // on the certificate.
 func (s *Solver) cleanupIngresses(ctx context.Context, ch *cmacme.Challenge) error {
-	log := logf.FromContext(ctx, "cleanupPods")
+	log := logf.FromContext(ctx, "cleanupIngresses")
 
-	httpDomainCfg, err := httpDomainCfgForChallenge(ch)
+	if ch.Spec.Solver.HTTP01.Ingress == nil {
+		return nil
+	}
+
+	httpDomainCfg, err := http01IngressCfgForChallenge(ch)
 	if err != nil {
 		return err
 	}
@@ -284,7 +304,7 @@ func (s *Solver) cleanupIngresses(ctx context.Context, ch *cmacme.Challenge) err
 			log := logf.WithRelatedResource(log, ingress).V(logf.DebugLevel)
 
 			log.V(logf.DebugLevel).Info("deleting ingress resource")
-			err := s.ingressCreateUpdater.Ingresses(ingress.Namespace).Delete(ctx, ingress.Name, metav1.DeleteOptions{})
+			err := s.Client.NetworkingV1().Ingresses(ingress.Namespace).Delete(ctx, ingress.Name, metav1.DeleteOptions{})
 			if err != nil {
 				log.V(logf.WarnLevel).Info("failed to delete ingress resource", "error", err)
 				errs = append(errs, err)
@@ -296,7 +316,7 @@ func (s *Solver) cleanupIngresses(ctx context.Context, ch *cmacme.Challenge) err
 	}
 
 	// otherwise, we need to remove any cert-manager added rules from the ingress resource
-	ing, err := s.ingressCreateUpdater.Ingresses(ch.Namespace).Get(ctx, existingIngressName, metav1.GetOptions{})
+	ing, err := s.Client.NetworkingV1().Ingresses(ch.Namespace).Get(ctx, existingIngressName, metav1.GetOptions{})
 	if k8sErrors.IsNotFound(err) {
 		log.Error(err, "named ingress resource not found, skipping cleanup")
 		return nil
@@ -339,7 +359,7 @@ func (s *Solver) cleanupIngresses(ctx context.Context, ch *cmacme.Challenge) err
 
 	ing.Spec.Rules = ingRules
 
-	_, err = s.ingressCreateUpdater.Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
+	_, err = s.Client.NetworkingV1().Ingresses(ing.Namespace).Update(ctx, ing, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -354,7 +374,7 @@ func (s *Solver) cleanupIngresses(ctx context.Context, ch *cmacme.Challenge) err
 func ingressPath(token, serviceName string) networkingv1.HTTPIngressPath {
 	return networkingv1.HTTPIngressPath{
 		Path:     solverPathFn(token),
-		PathType: func() *networkingv1.PathType { s := networkingv1.PathTypeExact; return &s }(),
+		PathType: func() *networkingv1.PathType { s := networkingv1.PathTypeImplementationSpecific; return &s }(),
 		Backend: networkingv1.IngressBackend{
 			Service: &networkingv1.IngressServiceBackend{
 				Name: serviceName,

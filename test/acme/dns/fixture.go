@@ -23,12 +23,12 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/jetstack/cert-manager/pkg/acme/webhook"
-	"github.com/jetstack/cert-manager/test/internal/apiserver"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
+	"github.com/cert-manager/cert-manager/test/internal/apiserver"
 )
 
 func init() {
@@ -47,7 +47,7 @@ type fixture struct {
 	resolvedFQDN            string
 	resolvedZone            string
 	allowAmbientCredentials bool
-	jsonConfig              *v1beta1.JSON
+	jsonConfig              *apiextensionsv1.JSON
 	strictMode              bool
 	useAuthoritative        *bool
 	kubectlManifestsPath    string

@@ -54,18 +54,50 @@ const (
 	// Annotation key used to denote whether a Secret is named on a Certificate
 	// as a 'next private key' Secret resource.
 	IsNextPrivateKeySecretLabelKey = "cert-manager.io/next-private-key"
+
+	// Annotation key used to limit the number of CertificateRequests to be kept for a Certificate.
+	// Minimum value is 1.
+	// If unset all CertificateRequests will be kept.
+	RevisionHistoryLimitAnnotationKey = "cert-manager.io/revision-history-limit"
+
+	// Annotation key used to set the PrivateKeyAlgorithm for a Certificate.
+	// If PrivateKeyAlgorithm is specified and `size` is not provided,
+	// key size of 256 will be used for `ECDSA` key algorithm and
+	// key size of 2048 will be used for `RSA` key algorithm.
+	// key size is ignored when using the `Ed25519` key algorithm.
+	// If unset an algorithm `RSA` will be used.
+	PrivateKeyAlgorithmAnnotationKey = "cert-manager.io/private-key-algorithm"
+
+	// Annotation key used to set the PrivateKeyEncoding for a Certificate.
+	// If provided, allowed values are `PKCS1` and `PKCS8` standing for PKCS#1
+	// and PKCS#8, respectively.
+	// If unset an encoding `PKCS1` will be used.
+	PrivateKeyEncodingAnnotationKey = "cert-manager.io/private-key-encoding"
+
+	// Annotation key used to set the size of the private key for a Certificate.
+	// If PrivateKeyAlgorithm is set to `RSA`, valid values are `2048`, `4096` or `8192`,
+	// and will default to `2048` if not specified.
+	// If PrivateKeyAlgorithm is set to `ECDSA`, valid values are `256`, `384` or `521`,
+	// and will default to `256` if not specified.
+	// If PrivateKeyAlgorithm is set to `Ed25519`, Size is ignored.
+	// No other values are allowed.
+	PrivateKeySizeAnnotationKey = "cert-manager.io/private-key-size"
+
+	// Annotation key used to set the PrivateKeyRotationPolicy for a Certificate.
+	// If unset a policy `Never` will be used.
+	PrivateKeyRotationPolicyAnnotationKey = "cert-manager.io/private-key-rotation-policy"
 )
 
 const (
-	// issuerNameAnnotation can be used to override the issuer specified on the
-	// created Certificate resource.
+	// IngressIssuerNameAnnotationKey holds the issuerNameAnnotation value which can be
+	// used to override the issuer specified on the created Certificate resource.
 	IngressIssuerNameAnnotationKey = "cert-manager.io/issuer"
-	// clusterIssuerNameAnnotation can be used to override the issuer specified on the
-	// created Certificate resource. The Certificate will reference the
-	// specified *ClusterIssuer* instead of normal issuer.
+	// IngressClusterIssuerNameAnnotationKey holds the clusterIssuerNameAnnotation value which
+	// can be used to override the issuer specified on the created Certificate resource. The Certificate
+	// will reference the specified *ClusterIssuer* instead of normal issuer.
 	IngressClusterIssuerNameAnnotationKey = "cert-manager.io/cluster-issuer"
-	// acmeIssuerHTTP01IngressClassAnnotation can be used to override the http01 ingressClass
-	// if the challenge type is set to http01
+	// IngressACMEIssuerHTTP01IngressClassAnnotationKey holds the acmeIssuerHTTP01IngressClassAnnotation value
+	// which can be used to override the http01 ingressClass if the challenge type is set to http01
 	IngressACMEIssuerHTTP01IngressClassAnnotationKey = "acme.cert-manager.io/http01-ingress-class"
 
 	// IngressClassAnnotationKey picks a specific "class" for the Ingress. The
@@ -110,7 +142,7 @@ const (
 	// as namespace/name.  The certificate is expected to have the is-serving-for annotations.
 	WantInjectAnnotation = "cert-manager.io/inject-ca-from"
 
-	// WantInjectAPIServerCAAnnotation, if set to "true", will make the cainjector
+	// WantInjectAPIServerCAAnnotation will - if set to "true" - make the cainjector
 	// inject the CA certificate for the Kubernetes apiserver into the resource.
 	// It discovers the apiserver's CA by inspecting the service account credentials
 	// mounted into the cainjector pod.
@@ -144,8 +176,10 @@ const (
 )
 
 // KeyUsage specifies valid usage contexts for keys.
-// See: https://tools.ietf.org/html/rfc5280#section-4.2.1.3
-//      https://tools.ietf.org/html/rfc5280#section-4.2.1.12
+// See:
+// https://tools.ietf.org/html/rfc5280#section-4.2.1.3
+// https://tools.ietf.org/html/rfc5280#section-4.2.1.12
+//
 // Valid KeyUsage values are as follows:
 // "signing",
 // "digital signature",

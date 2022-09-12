@@ -28,23 +28,26 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/clock"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/revisionmanager"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/metrics"
-	utilpki "github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/integration/framework"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/revisionmanager"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+	utilpki "github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/integration/framework"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 // TestRevisionManagerController will ensure that the revision manager
 // controller will delete old CertificateRequests occording to the
 // spec.revisionHistoryLimit value
 func TestRevisionManagerController(t *testing.T) {
-	config, stopFn := framework.RunControlPlane(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*40)
+	defer cancel()
+
+	config, stopFn := framework.RunControlPlane(t, ctx)
 	defer stopFn()
 
 	// Build, instantiate and run the revision manager controller.
@@ -53,7 +56,7 @@ func TestRevisionManagerController(t *testing.T) {
 	ctrl, queue, mustSync := revisionmanager.NewController(logf.Log, cmCl, cmFactory)
 
 	c := controllerpkg.NewController(
-		context.Background(),
+		ctx,
 		"revisionmanager_controller_test",
 		metrics.New(logf.Log, clock.RealClock{}),
 		ctrl.ProcessItem,
@@ -64,9 +67,6 @@ func TestRevisionManagerController(t *testing.T) {
 	stopController := framework.StartInformersAndController(t, factory, cmFactory, c)
 	defer stopController()
 
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*20)
-	defer cancel()
-
 	var (
 		crtName    = "testcrt"
 		namespace  = "testns"
@@ -75,7 +75,7 @@ func TestRevisionManagerController(t *testing.T) {
 
 	// Create Namespace
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
-	_, err := kubeClient.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
+	_, err := kubeClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +149,8 @@ func TestRevisionManagerController(t *testing.T) {
 	var crs []cmapi.CertificateRequest
 
 	// Wait for 3 CertificateRequests to be deleted, and that they have the correct revisions
-	err = wait.Poll(time.Millisecond*100, time.Second*5, func() (done bool, err error) {
-		requests, err := cmCl.CertmanagerV1().CertificateRequests(namespace).List(context.TODO(), metav1.ListOptions{})
+	err = wait.PollImmediateUntil(time.Millisecond*100, func() (done bool, err error) {
+		requests, err := cmCl.CertmanagerV1().CertificateRequests(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -163,7 +163,7 @@ func TestRevisionManagerController(t *testing.T) {
 		crs = requests.Items
 
 		return true, nil
-	})
+	}, ctx.Done())
 	if err != nil {
 		t.Fatal(err)
 	}

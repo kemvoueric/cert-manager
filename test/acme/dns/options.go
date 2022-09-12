@@ -19,13 +19,13 @@ package dns
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
-	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
-	"github.com/jetstack/cert-manager/pkg/acme/webhook"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
 )
 
 // Option applies a configuration option to the test fixture being built
@@ -59,9 +59,9 @@ func applyDefaults(f *fixture) {
 	}
 	if f.jsonConfig == nil {
 		if f.kubectlManifestsPath != "" {
-			d, err := ioutil.ReadFile(f.kubectlManifestsPath + "/config.json")
+			d, err := os.ReadFile(f.kubectlManifestsPath + "/config.json")
 			if err == nil {
-				f.jsonConfig = &extapi.JSON{
+				f.jsonConfig = &apiextensionsv1.JSON{
 					Raw: d,
 				}
 			}
@@ -121,7 +121,7 @@ func SetConfig(i interface{}) Option {
 		if err != nil {
 			panic(err)
 		}
-		f.jsonConfig = &extapi.JSON{Raw: d}
+		f.jsonConfig = &apiextensionsv1.JSON{Raw: d}
 	}
 }
 

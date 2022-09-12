@@ -29,9 +29,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 func buildCertificate(cn string, dnsNames ...string) *cmapi.Certificate {
@@ -413,16 +416,30 @@ func TestGenerateCSR(t *testing.T) {
 		},
 	}
 
+	exampleLiteralSubject := "CN=actual-cn, OU=FooLong, OU=Bar, O=example.org"
+	rawExampleLiteralSubject, err := ParseSubjectStringToRawDerBytes(exampleLiteralSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exampleMultiValueRDNLiteralSubject := "CN=actual-cn, OU=FooLong+OU=Bar, O=example.org"
+	rawExampleMultiValueRDNLiteralSubject, err := ParseSubjectStringToRawDerBytes(exampleMultiValueRDNLiteralSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
-		name    string
-		crt     *cmapi.Certificate
-		want    *x509.CertificateRequest
-		wantErr bool
+		name                                    string
+		crt                                     *cmapi.Certificate
+		want                                    *x509.CertificateRequest
+		wantErr                                 bool
+		literalCertificateSubjectFeatureEnabled bool
 	}{
 		{
 			name: "Generate CSR from certificate with only DNS",
 			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{DNSNames: []string{"example.org"}}},
-			want: &x509.CertificateRequest{Version: 3,
+			want: &x509.CertificateRequest{
+				Version:            0,
 				SignatureAlgorithm: x509.SHA256WithRSA,
 				PublicKeyAlgorithm: x509.RSA,
 				DNSNames:           []string{"example.org"},
@@ -432,7 +449,8 @@ func TestGenerateCSR(t *testing.T) {
 		{
 			name: "Generate CSR from certificate with only CN",
 			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org"}},
-			want: &x509.CertificateRequest{Version: 3,
+			want: &x509.CertificateRequest{
+				Version:            0,
 				SignatureAlgorithm: x509.SHA256WithRSA,
 				PublicKeyAlgorithm: x509.RSA,
 				Subject:            pkix.Name{CommonName: "example.org"},
@@ -442,7 +460,8 @@ func TestGenerateCSR(t *testing.T) {
 		{
 			name: "Generate CSR from certificate with extended key usages",
 			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org", Usages: []cmapi.KeyUsage{cmapi.UsageDigitalSignature, cmapi.UsageKeyEncipherment, cmapi.UsageIPsecEndSystem}}},
-			want: &x509.CertificateRequest{Version: 3,
+			want: &x509.CertificateRequest{
+				Version:            0,
 				SignatureAlgorithm: x509.SHA256WithRSA,
 				PublicKeyAlgorithm: x509.RSA,
 				Subject:            pkix.Name{CommonName: "example.org"},
@@ -452,7 +471,8 @@ func TestGenerateCSR(t *testing.T) {
 		{
 			name: "Generate CSR from certificate with double signing key usages",
 			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{CommonName: "example.org", Usages: []cmapi.KeyUsage{cmapi.UsageDigitalSignature, cmapi.UsageKeyEncipherment, cmapi.UsageSigning}}},
-			want: &x509.CertificateRequest{Version: 3,
+			want: &x509.CertificateRequest{
+				Version:            0,
 				SignatureAlgorithm: x509.SHA256WithRSA,
 				PublicKeyAlgorithm: x509.RSA,
 				Subject:            pkix.Name{CommonName: "example.org"},
@@ -464,9 +484,40 @@ func TestGenerateCSR(t *testing.T) {
 			crt:     &cmapi.Certificate{Spec: cmapi.CertificateSpec{}},
 			wantErr: true,
 		},
+		{
+			name: "Generate CSR from certficate with literal subject honouring the exact order",
+			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{LiteralSubject: exampleLiteralSubject}},
+			want: &x509.CertificateRequest{
+				Version:            0,
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				PublicKeyAlgorithm: x509.RSA,
+				RawSubject:         rawExampleLiteralSubject,
+				ExtraExtensions:    defaultExtraExtensions,
+			},
+			literalCertificateSubjectFeatureEnabled: true,
+		},
+		{
+			name: "Generate CSR from certficate with literal multi value subject honouring the exact order",
+			crt:  &cmapi.Certificate{Spec: cmapi.CertificateSpec{LiteralSubject: exampleMultiValueRDNLiteralSubject}},
+			want: &x509.CertificateRequest{
+				Version:            0,
+				SignatureAlgorithm: x509.SHA256WithRSA,
+				PublicKeyAlgorithm: x509.RSA,
+				RawSubject:         rawExampleMultiValueRDNLiteralSubject,
+				ExtraExtensions:    defaultExtraExtensions,
+			},
+			literalCertificateSubjectFeatureEnabled: true,
+		},
+		{
+			name:                                    "Error on generating CSR from certificate without CommonName in LiteralSubject, uri names, email address, or ip addresses",
+			crt:                                     &cmapi.Certificate{Spec: cmapi.CertificateSpec{LiteralSubject: "O=EmptyOrg"}},
+			wantErr:                                 true,
+			literalCertificateSubjectFeatureEnabled: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultMutableFeatureGate, feature.LiteralCertificateSubject, tt.literalCertificateSubjectFeatureEnabled)()
 			got, err := GenerateCSR(tt.crt)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateCSR() error = %v, wantErr %v", err, tt.wantErr)
@@ -575,7 +626,7 @@ func TestSignCSRTemplate(t *testing.T) {
 		pk, err := GenerateECPrivateKey(256)
 		require.NoError(t, err)
 		tmpl := &x509.Certificate{
-			Version:               3,
+			Version:               2,
 			BasicConstraintsValid: true,
 			SerialNumber:          big.NewInt(0),
 			Subject: pkix.Name{
@@ -715,7 +766,7 @@ func TestEncodeX509Chain(t *testing.T) {
 			expErr:     false,
 		},
 		"chain with a non-root cert where issuer matches subject should include that cert but not root": {
-			// see https://github.com/jetstack/cert-manager/issues/4142#issuecomment-884248923
+			// see https://github.com/cert-manager/cert-manager/issues/4142#issuecomment-884248923
 			inputCerts: []*x509.Certificate{root.cert, intA1.cert, leafInterCN.cert},
 			expChain:   joinPEM(intA1.pem, leafInterCN.pem),
 			expErr:     false,

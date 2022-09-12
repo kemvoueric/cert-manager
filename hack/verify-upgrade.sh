@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2021 The cert-manager Authors.
+# Copyright 2022 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,42 +20,59 @@ set -o pipefail
 
 SCRIPT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" > /dev/null && pwd )"
 export REPO_ROOT="${SCRIPT_ROOT}/.."
-source "${REPO_ROOT}/devel/lib/lib.sh"
 source "${REPO_ROOT}/hack/build/version.sh"
 
 kube::version::last_published_release
 
 LATEST_RELEASE="${KUBE_LAST_RELEASE}"
-CURRENT_VERSION="${KUBE_GIT_VERSION}"
 
-# Ensure helm, kind, kubectl, ytt, jq are available
-bazel build //hack/bin:helm //hack/bin:kind //hack/bin:ytt //hack/bin:jq //hack/bin:kubectl //hack/bin:kubectl-cert_manager
-bindir="$(bazel info bazel-bin)"
-export PATH="${bindir}/hack/bin/:$PATH"
+usage_and_exit() {
+	echo "usage: $0 <path-to-helm> <path-to-kind> <path-to-ytt> <path-to-kubectl> <path-to-cmctl>" >&2
+	exit 1
+}
 
-echo "Testing upgrade from ${LATEST_RELEASE} to ${CURRENT_VERSION}"
+if [[ -z "${1:-}" || -z "${2:-}" || -z "${3:-}" ||-z "${4:-}" || -z "${5:-}" ]]; then
+	usage_and_exit
+fi
 
-# Namespace to deploy into
+helm=$(realpath "$1")
+kind=$(realpath "$2")
+ytt=$(realpath "$3")
+kubectl=$(realpath "$4")
+cmctl=$(realpath "$5")
+
+# Set up a fresh kind cluster
+
+$kind delete clusters kind || :
+make e2e-setup-kind
+
+################################################
+# VERIFY INSTALL, UPGRADE, UNINSTALL WITH HELM #
+################################################
+
+# Namespace we'll deploy into
 NAMESPACE="${NAMESPACE:-cert-manager}"
+
 # Release name to use with Helm
 RELEASE_NAME="${RELEASE_NAME:-cert-manager}"
-# cert-manager Helm chart
-HELM_CHART="jetstack/cert-manager"
 
-############
-# VERIFY INSTALL, UPGRADE, UNINSTALL WITH HELM
-############
+HELM_URL="https://charts.jetstack.io"
+
+# cert-manager Helm chart location
+HELM_CHART="cmupgradetest/cert-manager"
+
+echo "+++ Testing upgrading from ${LATEST_RELEASE} to commit ${KUBE_GIT_COMMIT} with Helm"
 
 # This will target the host's helm repository cache
-helm repo add jetstack https://charts.jetstack.io
-helm repo update
+$helm repo add cmupgradetest $HELM_URL
+$helm repo update
 
 # 1. INSTALL THE LATEST PUBLISHED HELM CHART
 
-echo "Installing cert-manager ${LATEST_RELEASE} Helm chart into the cluster..."
+echo "+++ Installing cert-manager ${LATEST_RELEASE} Helm chart into the cluster..."
 
 # Upgrade or install latest published cert-manager Helm release
-helm upgrade \
+$helm upgrade \
     --install \
     --wait \
     --namespace "${NAMESPACE}" \
@@ -66,101 +83,98 @@ helm upgrade \
     "$HELM_CHART"
 
 # Wait for the cert-manager api to be available
-kubectl cert-manager check api --wait=1m -v
+$cmctl check api --wait=2m -v
+
+echo "+++ Creating some cert-manager resources.."
 
 # Create a cert-manager issuer and cert
-kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="first"
+$kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="first"
 
 # Ensure cert becomes ready
-kubectl wait --for=condition=Ready cert/test1 --timeout=180s
+$kubectl wait --for=condition=Ready cert/test1 --timeout=180s
 
-# 1. BUILD AND UPGRADE TO HELM CHART FROM THE CURRENT MASTER
+# 2. BUILD AND UPGRADE TO HELM CHART FROM THE CURRENT MASTER
 
-echo "Upgrading cert-manager Helm release to ${CURRENT_VERSION}..."
-"${REPO_ROOT}/devel/addon/certmanager/install.sh"
+# e2e-setup-certamanager both builds and deploys the latest available chart based on the current checkout
+make e2e-setup-certmanager
 
 # Wait for the cert-manager api to be available
-kubectl cert-manager check api --wait=1m -v
+$cmctl check api --wait=2m -v
 
 # Test that the existing cert-manager resources can still be retrieved
-kubectl get issuer/selfsigned-issuer cert/test1
+$kubectl get issuer/selfsigned-issuer cert/test1
 
-# # Create another certificate
-kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="second"
+echo "+++ Creating some more cert-manager resources.."
+
+# Create another certificate
+$kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="second"
 
 # Ensure cert becomes ready
-kubectl wait --for=condition=Ready cert/test2 --timeout=180s
+$kubectl wait --for=condition=Ready cert/test2 --timeout=180s
 
-# 1. UNINSTALL HELM RELEASE
-kubectl delete \
-	-f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml"
+# 3. UNINSTALL HELM RELEASE
 
-helm uninstall \
+echo "+++ Uninstalling the Helm release"
+
+$kubectl delete -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml"
+
+$helm uninstall \
     --namespace "${NAMESPACE}" \
     "$RELEASE_NAME"
 
-kubectl delete "namespace/${NAMESPACE}" \
-	--wait
+$kubectl delete "namespace/${NAMESPACE}" --wait
 
-############
-# VERIFY INSTALL, UPGRADE, UNINSTALL WITH STATIC MANIFESTS
-############
+############################################################
+# VERIFY INSTALL, UPGRADE, UNINSTALL WITH STATIC MANIFESTS #
+############################################################
 
 # 1. INSTALL THE LATEST PUBLISHED RELEASE WITH STATIC MANIFESTS
 
-echo "Install cert-manager ${LATEST_RELEASE} using static manifests.."
-kubectl apply \
-	-f "https://github.com/jetstack/cert-manager/releases/download/${LATEST_RELEASE}/cert-manager.yaml" \
+echo "+++ Testing cert-manager upgrade from ${LATEST_RELEASE} to commit ${KUBE_GIT_COMMIT} using static manifests"
+
+echo "+++ Installing cert-manager ${LATEST_RELEASE} using static manifests"
+
+$kubectl apply \
+	-f "https://github.com/cert-manager/cert-manager/releases/download/${LATEST_RELEASE}/cert-manager.yaml" \
 	--wait
 
-kubectl wait \
+$kubectl wait \
 	--for=condition=available \
 	--timeout=180s deployment/cert-manager-webhook \
 	--namespace "${NAMESPACE}"
 
 # Wait for the cert-manager api to be available
-kubectl cert-manager check api --wait=1m -v
+$cmctl check api --wait=2m -v
 
 # Create a cert-manager issuer and cert
-kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="first"
+$kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="first"
 
 # Ensure cert becomes ready
-kubectl wait --for=condition=Ready cert/test1 --timeout=180s
+$kubectl wait --for=condition=Ready cert/test1 --timeout=180s
 
 # 2. VERIFY UPGRADE TO THE LATEST BUILD FROM MASTER
 
-echo "Install cert-manager ${CURRENT_VERSION} using static manifests.."
+MANIFEST_LOCATION=${REPO_ROOT}/_bin/yaml/cert-manager.yaml
+
+echo "+++ Installing cert-manager commit ${KUBE_GIT_COMMIT} using static manifests"
 
 # Build the static manifests
-bazel build //deploy/manifests
+make release-manifests
 
-# TODO: refactor this functionality here and in
-# devel/addon/certmanager/install.sh so it can be reused.
-# Tag images with APP_VERSION for consistency with devel/addon/certmanager/install.sh.
-export APP_VERSION="$(date +"%s")"
-# Build cert-manager images.
-bazel run --stamp=true \
- --platforms=@io_bazel_rules_go//go/toolchain:linux_amd64 \
- "//devel/addon/certmanager:bundle"
-
-# Load all images into the cluster
-load_image "quay.io/jetstack/cert-manager-controller:${APP_VERSION}" &
-load_image "quay.io/jetstack/cert-manager-acmesolver:${APP_VERSION}" &
-load_image "quay.io/jetstack/cert-manager-cainjector:${APP_VERSION}" &
-load_image "quay.io/jetstack/cert-manager-webhook:${APP_VERSION}" &
-wait
+RELEASE_VERSION=$(make --silent release-version)
 
 # Overwrite image tags in the static manifests and deploy.
-ytt -f "${REPO_ROOT}/test/fixtures/upgrade/overlay/controller-ops.yaml" \
-	-f "${REPO_ROOT}/test/fixtures/upgrade/overlay/cainjector-ops.yaml" \
-	-f "${REPO_ROOT}/test/fixtures/upgrade/overlay/webhook-ops.yaml" \
-	-f "${REPO_ROOT}/test/fixtures/upgrade/overlay/values.yaml" \
-	-f "${REPO_ROOT}/bazel-bin/deploy/manifests/cert-manager.yaml" \
-	--data-value app_version="${APP_VERSION}" \
-	--ignore-unknown-comments | kubectl apply -f -
+$ytt -f "${REPO_ROOT}/test/fixtures/upgrade/overlay/controller-ops.yaml" \
+     -f "${REPO_ROOT}/test/fixtures/upgrade/overlay/cainjector-ops.yaml" \
+     -f "${REPO_ROOT}/test/fixtures/upgrade/overlay/webhook-ops.yaml" \
+     -f "${REPO_ROOT}/test/fixtures/upgrade/overlay/values.yaml" \
+     -f $MANIFEST_LOCATION \
+     --data-value app_version="${RELEASE_VERSION}" \
+     --ignore-unknown-comments | kubectl apply -f -
 
-rollout_cmd="kubectl rollout status deployment/cert-manager-webhook --namespace ${NAMESPACE}"
+rollout_cmd="$kubectl rollout status deployment/cert-manager-webhook --namespace ${NAMESPACE}"
 attempts=0
+
 until $rollout_cmd; do
   $rollout_cmd
   ((attempts++))
@@ -172,18 +186,21 @@ until $rollout_cmd; do
 done
 
 # Wait for the cert-manager api to be available
-kubectl cert-manager check api --wait=1m -v
+$cmctl check api --wait=2m -v
 
 # Test that the existing cert-manager resources can still be retrieved
-kubectl get issuer/selfsigned-issuer cert/test1
+$kubectl get issuer/selfsigned-issuer cert/test1
 
-# # Create another certificate
-kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="second"
+echo "+++ Creating some cert-manager resources"
+
+# Create another certificate
+$kubectl apply -f "${REPO_ROOT}/test/fixtures/cert-manager-resources.yaml" --selector=test="second"
 
 # Ensure cert becomes ready
-kubectl wait --for=condition=Ready cert/test2 --timeout=180s
+$kubectl wait --for=condition=Ready cert/test2 --timeout=180s
 
 # 3. UNINSTALL
-kubectl delete \
-	-f "${REPO_ROOT}/bazel-bin/deploy/manifests/cert-manager.yaml" \
-	--wait \
+
+echo "+++ Uninstalling cert-manager"
+
+$kubectl delete -f $MANIFEST_LOCATION --wait

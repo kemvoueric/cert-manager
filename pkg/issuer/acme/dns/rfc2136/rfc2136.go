@@ -26,16 +26,13 @@ import (
 	"strings"
 	"time"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-
 	"github.com/miekg/dns"
 
-	"github.com/jetstack/cert-manager/pkg/internal/apis/certmanager/validation/util"
+	"github.com/cert-manager/cert-manager/internal/apis/certmanager/validation/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
-var defaultPort = "53"
-
-// This list must be kept in sync with pkg/apis/certmanager/validation/issuer.go
+// This list must be kept in sync with internal/apis/certmanager/validation/issuer.go
 var supportedAlgorithms = map[string]string{
 	"HMACMD5":    dns.HmacMD5,
 	"HMACSHA1":   dns.HmacSHA1,
@@ -129,6 +126,7 @@ func (r *DNSProvider) changeRecord(action, fqdn, zone, value string, ttl int) er
 
 	// Setup client
 	c := new(dns.Client)
+	c.TsigProvider = tsigHMACProvider(r.tsigSecret)
 	c.SingleInflight = true
 	// TSIG authentication / msg signing
 	if len(r.tsigKeyName) > 0 && len(r.tsigSecret) > 0 {
@@ -146,4 +144,14 @@ func (r *DNSProvider) changeRecord(action, fqdn, zone, value string, ttl int) er
 	}
 
 	return nil
+}
+
+// Nameserver returns the nameserver configured for this provider when it was created
+func (r *DNSProvider) Nameserver() string {
+	return r.nameserver
+}
+
+// TSIGAlgorithm returns the TSIG algorithm configured for this provider when it was created
+func (r *DNSProvider) TSIGAlgorithm() string {
+	return r.tsigAlgorithm
 }

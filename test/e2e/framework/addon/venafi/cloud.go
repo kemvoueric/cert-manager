@@ -23,11 +23,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework/addon/base"
-	"github.com/jetstack/cert-manager/test/e2e/framework/config"
-	"github.com/jetstack/cert-manager/test/e2e/framework/util/errors"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/addon/base"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/config"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/util/errors"
 )
 
 type VenafiCloud struct {
@@ -87,6 +87,7 @@ func (v *VenafiCloud) Provision() error {
 	v.details.issuerTemplate = cmapi.VenafiIssuer{
 		Zone: v.config.Addons.Venafi.Cloud.Zone,
 		Cloud: &cmapi.VenafiCloud{
+			URL: "https://api.venafi.cloud",
 			APITokenSecretRef: cmmeta.SecretKeySelector{
 				LocalObjectReference: cmmeta.LocalObjectReference{
 					Name: s.Name,
@@ -134,4 +135,16 @@ func (t *CloudDetails) BuildClusterIssuer() *cmapi.ClusterIssuer {
 			},
 		},
 	}
+}
+
+// SetAPIKey sets the Secret data["apikey"] value
+func (v *VenafiCloud) SetAPIKey(token string) error {
+	v.createdSecret.Data["apikey"] = []byte(token)
+	s, err := v.Base.Details().KubeClient.CoreV1().Secrets(v.Namespace).Update(context.TODO(), v.createdSecret, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+
+	v.createdSecret = s
+	return nil
 }

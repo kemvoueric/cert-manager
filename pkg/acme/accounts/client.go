@@ -25,27 +25,34 @@ import (
 
 	acmeapi "golang.org/x/crypto/acme"
 
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	acmeutil "github.com/jetstack/cert-manager/pkg/acme/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/metrics"
-	"github.com/jetstack/cert-manager/pkg/util"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	"github.com/cert-manager/cert-manager/pkg/acme/client/middleware"
+	acmeutil "github.com/cert-manager/cert-manager/pkg/acme/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+)
+
+const (
+	// defaultACMEHTTPTimeout sets the default maximum time that an individual HTTP request can take when doing ACME operations.
+	// Note that there may be other timeouts - e.g. dial timeouts or TLS handshake timeouts - which will be smaller than this. This
+	// timeout is the overall timeout for the entire request.
+	defaultACMEHTTPTimeout = time.Second * 90
 )
 
 // NewClientFunc is a function type for building a new ACME client.
-type NewClientFunc func(*http.Client, cmacme.ACMEIssuer, *rsa.PrivateKey) acmecl.Interface
+type NewClientFunc func(*http.Client, cmacme.ACMEIssuer, *rsa.PrivateKey, string) acmecl.Interface
 
 var _ NewClientFunc = NewClient
 
 // NewClient is an implementation of NewClientFunc that returns a real ACME client.
-func NewClient(client *http.Client, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey) acmecl.Interface {
-	return &acmeapi.Client{
+func NewClient(client *http.Client, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) acmecl.Interface {
+	return middleware.NewLogger(&acmeapi.Client{
 		Key:          privateKey,
 		HTTPClient:   client,
 		DirectoryURL: config.Server,
-		UserAgent:    util.CertManagerUserAgent,
+		UserAgent:    userAgent,
 		RetryBackoff: acmeutil.RetryBackoff,
-	}
+	})
 }
 
 // BuildHTTPClient returns a instrumented HTTP client to be used by the ACME
@@ -70,6 +77,6 @@ func BuildHTTPClient(metrics *metrics.Metrics, skipTLSVerify bool) *http.Client 
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			},
-			Timeout: time.Second * 30,
+			Timeout: defaultACMEHTTPTimeout,
 		})
 }

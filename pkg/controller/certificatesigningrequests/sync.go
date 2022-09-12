@@ -26,12 +26,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/util"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	experimentalapi "github.com/cert-manager/cert-manager/pkg/apis/experimental/v1alpha1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 func (c *Controller) Sync(ctx context.Context, csr *certificatesv1.CertificateSigningRequest) error {
@@ -119,12 +121,31 @@ func (c *Controller) Sync(ctx context.Context, csr *certificatesv1.CertificateSi
 			message := fmt.Sprintf("Requester may not reference Namespaced Issuer %s/%s", ref.Namespace, ref.Name)
 			c.recorder.Event(csr, corev1.EventTypeWarning, "DeniedReference", message)
 			util.CertificateSigningRequestSetFailed(csr, "DeniedReference", message)
-			if _, err := c.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{}); err != nil {
-				return err
-			}
-
-			return nil
+			_, err := util.UpdateOrApplyStatus(ctx, c.certClient, csr, certificatesv1.CertificateFailed, c.fieldManager)
+			return err
 		}
+	}
+
+	duration, err := pki.DurationFromCertificateSigningRequest(csr)
+	if err != nil {
+		message := fmt.Sprintf("Failed to parse requested duration: %s", err)
+		log.Error(err, message)
+		c.recorder.Event(csr, corev1.EventTypeWarning, "ErrorParseDuration", message)
+		util.CertificateSigningRequestSetFailed(csr, "ErrorParseDuration", message)
+		_, err := util.UpdateOrApplyStatus(ctx, c.certClient, csr, certificatesv1.CertificateFailed, c.fieldManager)
+		return err
+	}
+
+	// Enforce minimum duration of certificate to be 600s to ensure
+	// compatibility with Certificate Signing Requests's
+	// spec.expirationSeconds
+	if duration < experimentalapi.CertificateSigningRequestMinimumDuration {
+		message := fmt.Sprintf("CertificateSigningRequest minimum allowed duration is %s, requested %s", experimentalapi.CertificateSigningRequestMinimumDuration, duration)
+		c.recorder.Event(csr, corev1.EventTypeWarning, "InvalidDuration", message)
+		util.CertificateSigningRequestSetFailed(csr, "InvalidDuration", message)
+		_, err := util.UpdateOrApplyStatus(ctx, c.certClient, csr, certificatesv1.CertificateFailed, c.fieldManager)
+		return err
+
 	}
 
 	// check ready condition

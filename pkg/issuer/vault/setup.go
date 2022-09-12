@@ -20,11 +20,11 @@ import (
 	"context"
 	"fmt"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	vaultinternal "github.com/jetstack/cert-manager/pkg/internal/vault"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 const (
@@ -45,6 +45,7 @@ const (
 	messageAppRoleAuthFieldsRequired = "Vault AppRole auth requires both roleId and tokenSecretRef.name"
 )
 
+// Setup creates a new Vault client and attempts to authenticate with the Vault instance and sets the issuer's conditions to reflect the success of the setup.
 func (v *Vault) Setup(ctx context.Context) error {
 	if v.issuer.GetSpec().Vault == nil {
 		logf.V(logf.WarnLevel).Infof("%s: %s", v.issuer.GetObjectMeta().Name, messageVaultConfigRequired)

@@ -18,21 +18,22 @@ package venaficloud
 
 import (
 	"context"
+	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	vaddon "github.com/jetstack/cert-manager/test/e2e/framework/addon/venafi"
-	"github.com/jetstack/cert-manager/test/e2e/framework/helper/featureset"
-	"github.com/jetstack/cert-manager/test/e2e/framework/util/errors"
-	"github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	vaddon "github.com/cert-manager/cert-manager/test/e2e/framework/addon/venafi"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/featureset"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/util/errors"
+	"github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates"
 )
 
-var _ = framework.ConformanceDescribe("[Feature:Issuers:Venafi:Cloud] Certificates", func() {
+var _ = framework.ConformanceDescribe("Certificates", func() {
 	// unsupportedFeatures is a list of features that are not supported by the
 	// Venafi Cloud issuer.
 	var unsupportedFeatures = featureset.NewFeatureSet(
@@ -49,6 +50,7 @@ var _ = framework.ConformanceDescribe("[Feature:Issuers:Venafi:Cloud] Certificat
 		// Venafi seems to only support SSH Ed25519 keys
 		featureset.Ed25519FeatureSet,
 		featureset.IssueCAFeature,
+		featureset.LiteralSubjectFeature,
 	)
 
 	provisioner := new(venafiProvisioner)
@@ -99,6 +101,11 @@ func (v *venafiProvisioner) createIssuer(f *framework.Framework) cmmeta.ObjectRe
 	issuer, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), issuer, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "failed to create issuer for venafi")
 
+	// wait for issuer to be ready
+	By("Waiting for Venafi Cloud Issuer to be Ready")
+	issuer, err = f.Helper().WaitIssuerReady(issuer, time.Minute*5)
+	Expect(err).ToNot(HaveOccurred())
+
 	return cmmeta.ObjectReference{
 		Group: cmapi.SchemeGroupVersion.Group,
 		Kind:  cmapi.IssuerKind,
@@ -124,6 +131,11 @@ func (v *venafiProvisioner) createClusterIssuer(f *framework.Framework) cmmeta.O
 	issuer := v.cloud.Details().BuildClusterIssuer()
 	issuer, err = f.CertManagerClientSet.CertmanagerV1().ClusterIssuers().Create(context.TODO(), issuer, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "failed to create issuer for venafi")
+
+	// wait for issuer to be ready
+	By("Waiting for Venafi Cloud Cluster Issuer to be Ready")
+	issuer, err = f.Helper().WaitClusterIssuerReady(issuer, time.Minute*5)
+	Expect(err).ToNot(HaveOccurred())
 
 	return cmmeta.ObjectReference{
 		Group: cmapi.SchemeGroupVersion.Group,

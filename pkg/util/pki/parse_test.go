@@ -23,13 +23,15 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/stretchr/testify/assert"
 )
 
 func generatePrivateKeyBytes(keyAlgo v1.PrivateKeyAlgorithm, keySize int) ([]byte, error) {
@@ -289,7 +291,7 @@ func TestParseSingleCertificateChain(t *testing.T) {
 			expErr:       false,
 		},
 		"if certificate chain has two certs with the same CN, shouldn't affect output": {
-			// see https://github.com/jetstack/cert-manager/issues/4142
+			// see https://github.com/cert-manager/cert-manager/issues/4142
 			inputBundle:  joinPEM(leafInterCN.pem, intA1.pem, intA2.pem, root.pem),
 			expPEMBundle: PEMBundle{ChainPEM: joinPEM(leafInterCN.pem, intA2.pem, intA1.pem), CAPEM: root.pem},
 			expErr:       false,
@@ -360,4 +362,95 @@ func TestParseSingleCertificateChain(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMustParseRDN(t *testing.T) {
+	subject := "SERIALNUMBER=42, L=some-locality, ST=some-state-or-province, STREET=some-street, CN=foo-long.com, OU=FooLong, OU=Barq, OU=Baz, OU=Dept., O=Corp., C=US"
+	rdnSeq, err := ParseSubjectStringToRdnSequence(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedRdnSeq :=
+		pkix.RDNSequence{
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Country, Value: "US"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Organization, Value: "Corp."},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Dept."},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Baz"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Barq"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "FooLong"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.CommonName, Value: "foo-long.com"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.StreetAddress, Value: "some-street"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Province, Value: "some-state-or-province"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Locality, Value: "some-locality"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.SerialNumber, Value: "42"},
+			},
+		}
+
+	assert.Equal(t, expectedRdnSeq, rdnSeq)
+}
+
+func TestMustKeepOrderInRawDerBytes(t *testing.T) {
+	subject := "CN=foo-long.com,OU=FooLong,OU=Barq,OU=Baz,OU=Dept.,O=Corp.,C=US"
+	bytes, err := ParseSubjectStringToRawDerBytes(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rdnSeq pkix.RDNSequence
+	_, err2 := asn1.Unmarshal(bytes, &rdnSeq)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+
+	t.Log(bytes)
+
+	expectedRdnSeq :=
+		pkix.RDNSequence{
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Country, Value: "US"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.Organization, Value: "Corp."},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Dept."},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Baz"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "Barq"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.OrganizationalUnit, Value: "FooLong"},
+			},
+			[]pkix.AttributeTypeAndValue{
+				{Type: OIDConstants.CommonName, Value: "foo-long.com"},
+			},
+		}
+
+	assert.Equal(t, expectedRdnSeq, rdnSeq)
+	assert.Equal(t, subject, rdnSeq.String())
 }

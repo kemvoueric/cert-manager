@@ -20,20 +20,20 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
-	"github.com/jetstack/cert-manager/test/e2e/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var _ = framework.CertManagerDescribe("ACME webhook DNS provider", func() {
@@ -66,7 +66,7 @@ var _ = framework.CertManagerDescribe("ACME webhook DNS provider", func() {
 								Webhook: &cmacme.ACMEIssuerDNS01ProviderWebhook{
 									GroupName:  f.Config.Addons.DNS01Webhook.GroupName,
 									SolverName: f.Config.Addons.DNS01Webhook.SolverName,
-									Config: &v1beta1.JSON{
+									Config: &apiextensionsv1.JSON{
 										Raw: []byte(`{}`),
 									},
 								},
@@ -126,41 +126,45 @@ var _ = framework.CertManagerDescribe("ACME webhook DNS provider", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			var order *cmacme.Order
-			pollErr := wait.PollImmediate(2*time.Second, time.Second*30,
+			logf, done := log.LogBackoff()
+			defer done()
+			pollErr := wait.PollImmediate(2*time.Second, time.Minute*1,
 				func() (bool, error) {
 					orders, err := listOwnedOrders(f.CertManagerClientSet, cert)
 					Expect(err).NotTo(HaveOccurred())
 
-					log.Logf("Found %d orders for certificate", len(orders))
+					logf("Found %d orders for certificate", len(orders))
 					if len(orders) == 1 {
 						order = orders[0]
-						log.Logf("Found order named %q", order.Name)
+						logf("Found order named %q", order.Name)
 						return true, nil
 					}
 
-					log.Logf("Waiting as one Order should exist, but we found %d", len(orders))
+					logf("Waiting as one Order should exist, but we found %d", len(orders))
 					return false, nil
 				},
 			)
 			Expect(pollErr).NotTo(HaveOccurred())
 
-			pollErr = wait.PollImmediate(2*time.Second, time.Second*90,
+			logf, done = log.LogBackoff()
+			defer done()
+			pollErr = wait.PollImmediate(2*time.Second, time.Minute*3,
 				func() (bool, error) {
 					l, err := listOwnedChallenges(f.CertManagerClientSet, order)
 					Expect(err).NotTo(HaveOccurred())
 
-					log.Logf("Found %d challenges", len(l))
+					logf("Found %d challenges", len(l))
 					if len(l) == 0 {
-						log.Logf("Waiting for at least one challenge to exist")
+						logf("Waiting for at least one challenge to exist")
 						return false, nil
 					}
 
 					allPresented := true
 					for _, ch := range l {
-						log.Logf("Found challenge named %q", ch.Name)
+						logf("Found challenge named %q", ch.Name)
 
 						if ch.Status.Presented == false {
-							log.Logf("Challenge %q has not been 'Presented'", ch.Name)
+							logf("Challenge %q has not been 'Presented'", ch.Name)
 							allPresented = false
 						}
 					}

@@ -21,7 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -29,24 +29,19 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/errgroup"
 	admissionv1 "k8s.io/api/admission/v1"
-	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	apiextensionsinstall "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	runtimeutil "k8s.io/apimachinery/pkg/util/runtime"
 	ciphers "k8s.io/component-base/cli/flag"
-	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	cmdutil "github.com/jetstack/cert-manager/cmd/util"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util/profiling"
-	"github.com/jetstack/cert-manager/pkg/webhook/handlers"
-	servertls "github.com/jetstack/cert-manager/pkg/webhook/server/tls"
-	webhookutil "github.com/jetstack/cert-manager/pkg/webhook/server/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util/profiling"
+	"github.com/cert-manager/cert-manager/pkg/webhook/handlers"
+	servertls "github.com/cert-manager/cert-manager/pkg/webhook/server/tls"
 )
 
 var (
@@ -54,12 +49,12 @@ var (
 	// ConversionReview resources submitted to the webhook server.
 	// It is not used for performing validation, mutation or conversion.
 	defaultScheme = runtime.NewScheme()
+
+	ErrNotListening = errors.New("Server is not listening yet")
 )
 
 func init() {
 	apiextensionsinstall.Install(defaultScheme)
-
-	runtimeutil.Must(admissionv1beta1.AddToScheme(defaultScheme))
 	runtimeutil.Must(admissionv1.AddToScheme(defaultScheme))
 
 	// we need to add the options to empty v1
@@ -87,8 +82,9 @@ type Server struct {
 	// If not specified, the healthz endpoint will not be exposed.
 	HealthzAddr string
 
-	// EnablePprof controls whether net/http/pprof handlers are registered with
-	// the HTTP listener.
+	// PprofAddr is the address the pprof endpoint should be served on if enabled.
+	PprofAddr string
+	// EnablePprof determines whether pprof is enabled.
 	EnablePprof bool
 
 	// Scheme is used to decode/encode request/response payloads.
@@ -105,9 +101,7 @@ type Server struct {
 	MutationWebhook   handlers.MutatingAdmissionHook
 	ConversionWebhook handlers.ConversionHook
 
-	// Log is an optional logger to write informational and error messages to.
-	// If not specified, no messages will be logged.
-	Log logr.Logger
+	log logr.Logger
 
 	// CipherSuites is the list of allowed cipher suites for the server.
 	// Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants).
@@ -122,13 +116,9 @@ type Server struct {
 
 type handleFunc func(context.Context, runtime.Object) (runtime.Object, error)
 
-func (s *Server) Run(stopCh <-chan struct{}) error {
-	if s.Log == nil {
-		s.Log = crlog.NullLogger{}
-	}
-
-	gctx := cmdutil.ContextWithStopCh(context.Background(), stopCh)
-	g, gctx := errgroup.WithContext(gctx)
+func (s *Server) Run(ctx context.Context) error {
+	s.log = logf.FromContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 
 	// if a HealthzAddr is provided, start the healthz listener
 	if s.HealthzAddr != "" {
@@ -137,12 +127,12 @@ func (s *Server) Run(stopCh <-chan struct{}) error {
 			return err
 		}
 
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", s.handleHealthz)
-		mux.HandleFunc("/livez", s.handleLivez)
-		s.Log.V(logf.InfoLevel).Info("listening for insecure healthz connections", "address", s.HealthzAddr)
+		healthMux := http.NewServeMux()
+		healthMux.HandleFunc("/healthz", s.handleHealthz)
+		healthMux.HandleFunc("/livez", s.handleLivez)
+		s.log.V(logf.InfoLevel).Info("listening for insecure healthz connections", "address", s.HealthzAddr)
 		server := &http.Server{
-			Handler: mux,
+			Handler: healthMux,
 		}
 		g.Go(func() error {
 			<-gctx.Done()
@@ -163,6 +153,39 @@ func (s *Server) Run(stopCh <-chan struct{}) error {
 		})
 	}
 
+	// if a PprofAddr is provided, start the pprof listener
+	if s.EnablePprof {
+		pprofListener, err := net.Listen("tcp", s.PprofAddr)
+		if err != nil {
+			return err
+		}
+
+		profilerMux := http.NewServeMux()
+		// Add pprof endpoints to this mux
+		profiling.Install(profilerMux)
+		s.log.V(logf.InfoLevel).Info("running go profiler on", "address", s.PprofAddr)
+		server := &http.Server{
+			Handler: profilerMux,
+		}
+		g.Go(func() error {
+			<-gctx.Done()
+			// allow a timeout for graceful shutdown
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := server.Shutdown(ctx); err != nil {
+				return err
+			}
+			return nil
+		})
+		g.Go(func() error {
+			if err := server.Serve(pprofListener); err != http.ErrServerClosed {
+				return err
+			}
+			return nil
+		})
+	}
+
 	// create a listener for actual webhook requests
 	listener, err := net.Listen("tcp", s.ListenAddr)
 	if err != nil {
@@ -171,9 +194,9 @@ func (s *Server) Run(stopCh <-chan struct{}) error {
 
 	// wrap the listener with TLS if a CertificateSource is provided
 	if s.CertificateSource != nil {
-		s.Log.V(logf.InfoLevel).Info("listening for secure connections", "address", s.ListenAddr)
+		s.log.V(logf.InfoLevel).Info("listening for secure connections", "address", s.ListenAddr)
 		g.Go(func() error {
-			if err := s.CertificateSource.Run(gctx.Done()); (err != nil) && !errors.Is(err, context.Canceled) {
+			if err := s.CertificateSource.Run(gctx); (err != nil) && !errors.Is(err, context.Canceled) {
 				return err
 			}
 			return nil
@@ -193,20 +216,16 @@ func (s *Server) Run(stopCh <-chan struct{}) error {
 			PreferServerCipherSuites: true,
 		})
 	} else {
-		s.Log.V(logf.InfoLevel).Info("listening for insecure connections", "address", s.ListenAddr)
+		s.log.V(logf.InfoLevel).Info("listening for insecure connections", "address", s.ListenAddr)
 	}
 
 	s.listener = listener
-	mux := http.NewServeMux()
-	mux.HandleFunc("/validate", s.handle(s.validate))
-	mux.HandleFunc("/mutate", s.handle(s.mutate))
-	mux.HandleFunc("/convert", s.handle(s.convert))
-	if s.EnablePprof {
-		profiling.Install(mux)
-		s.Log.V(logf.InfoLevel).Info("registered pprof handlers")
-	}
+	serverMux := http.NewServeMux()
+	serverMux.HandleFunc("/validate", s.handle(s.validate))
+	serverMux.HandleFunc("/mutate", s.handle(s.mutate))
+	serverMux.HandleFunc("/convert", s.handle(s.convert))
 	server := &http.Server{
-		Handler: mux,
+		Handler: serverMux,
 	}
 	g.Go(func() error {
 		<-gctx.Done()
@@ -232,7 +251,7 @@ func (s *Server) Run(stopCh <-chan struct{}) error {
 // Port returns the port number that the webhook listener is listening on
 func (s *Server) Port() (int, error) {
 	if s.listener == nil {
-		return 0, errors.New("Run() must be called before Port()")
+		return 0, ErrNotListening
 	}
 	tcpAddr, ok := s.listener.Addr().(*net.TCPAddr)
 	if !ok {
@@ -249,55 +268,21 @@ func (s *Server) scheme() *runtime.Scheme {
 }
 
 func (s *Server) validate(ctx context.Context, obj runtime.Object) (runtime.Object, error) {
-	outputVersion := admissionv1.SchemeGroupVersion
 	review, isV1 := obj.(*admissionv1.AdmissionReview)
 	if !isV1 {
-		outputVersion = admissionv1beta1.SchemeGroupVersion
-		reviewv1beta1, isv1beta1 := obj.(*admissionv1beta1.AdmissionReview)
-		if !isv1beta1 {
-			return nil, errors.New("request is not of type apiextensions v1 or v1beta1")
-		}
-		review = &admissionv1.AdmissionReview{}
-		webhookutil.Convert_v1beta1_AdmissionReview_To_admission_AdmissionReview(reviewv1beta1, review)
+		return nil, errors.New("request is not of type apiextensions v1")
 	}
-	resp := s.ValidationWebhook.Validate(ctx, review.Request)
-	review.Response = resp
-
-	// reply v1
-	if outputVersion.Version == admissionv1.SchemeGroupVersion.Version {
-		return review, nil
-	}
-
-	// reply v1beta1
-	reviewv1beta1 := &admissionv1beta1.AdmissionReview{}
-	webhookutil.Convert_admission_AdmissionReview_To_v1beta1_AdmissionReview(review, reviewv1beta1)
-	return reviewv1beta1, nil
+	review.Response = s.ValidationWebhook.Validate(ctx, review.Request)
+	return review, nil
 }
 
 func (s *Server) mutate(ctx context.Context, obj runtime.Object) (runtime.Object, error) {
-	outputVersion := admissionv1.SchemeGroupVersion
 	review, isV1 := obj.(*admissionv1.AdmissionReview)
 	if !isV1 {
-		outputVersion = admissionv1beta1.SchemeGroupVersion
-		reviewv1beta1, isv1beta1 := obj.(*admissionv1beta1.AdmissionReview)
-		if !isv1beta1 {
-			return nil, errors.New("request is not of type apiextensions v1 or v1beta1")
-		}
-		review = &admissionv1.AdmissionReview{}
-		webhookutil.Convert_v1beta1_AdmissionReview_To_admission_AdmissionReview(reviewv1beta1, review)
+		return nil, errors.New("request is not of type apiextensions v1")
 	}
-	resp := s.MutationWebhook.Mutate(ctx, review.Request)
-	review.Response = resp
-
-	// reply v1
-	if outputVersion.Version == admissionv1.SchemeGroupVersion.Version {
-		return review, nil
-	}
-
-	// reply v1beta1
-	reviewv1beta1 := &admissionv1beta1.AdmissionReview{}
-	webhookutil.Convert_admission_AdmissionReview_To_v1beta1_AdmissionReview(review, reviewv1beta1)
-	return reviewv1beta1, nil
+	review.Response = s.MutationWebhook.Mutate(ctx, review.Request)
+	return review, nil
 }
 
 func (s *Server) convert(_ context.Context, obj runtime.Object) (runtime.Object, error) {
@@ -306,13 +291,7 @@ func (s *Server) convert(_ context.Context, obj runtime.Object) (runtime.Object,
 		if review.Request == nil {
 			return nil, errors.New("review.request was nil")
 		}
-		review.Response = s.ConversionWebhook.ConvertV1(review.Request)
-		return review, nil
-	case *apiextensionsv1beta1.ConversionReview:
-		if review.Request == nil {
-			return nil, errors.New("review.request was nil")
-		}
-		review.Response = s.ConversionWebhook.ConvertV1Beta1(review.Request)
+		review.Response = s.ConversionWebhook.Convert(review.Request)
 		return review, nil
 	default:
 		return nil, fmt.Errorf("unsupported conversion review type: %T", review)
@@ -323,9 +302,9 @@ func (s *Server) handle(inner handleFunc) func(w http.ResponseWriter, req *http.
 	return func(w http.ResponseWriter, req *http.Request) {
 		defer req.Body.Close()
 
-		data, err := ioutil.ReadAll(req.Body)
+		data, err := io.ReadAll(req.Body)
 		if err != nil {
-			s.Log.Error(err, "failed to read request body")
+			s.log.Error(err, "failed to read request body")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -335,19 +314,19 @@ func (s *Server) handle(inner handleFunc) func(w http.ResponseWriter, req *http.
 		})
 		obj, _, err := codec.Decode(data, nil, nil)
 		if err != nil {
-			s.Log.Error(err, "failed to decode request body")
+			s.log.Error(err, "failed to decode request body")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
 		result, err := inner(req.Context(), obj)
 		if err != nil {
-			s.Log.Error(err, "failed to process webhook request")
+			s.log.Error(err, "failed to process webhook request")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		if err := codec.Encode(result, w); err != nil {
-			s.Log.Error(err, "failed to encode response body")
+			s.log.Error(err, "failed to encode response body")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -358,7 +337,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
 	if s.CertificateSource != nil && !s.CertificateSource.Healthy() {
-		s.Log.V(logf.WarnLevel).Info("Health check failed as CertificateSource is unhealthy")
+		s.log.V(logf.WarnLevel).Info("Health check failed as CertificateSource is unhealthy")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

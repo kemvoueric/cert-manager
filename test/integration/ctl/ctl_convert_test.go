@@ -18,12 +18,12 @@ package ctl
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"testing"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/convert"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/convert"
 )
 
 const (
@@ -144,7 +144,7 @@ func TestCtlConvert(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			expOutput, err := ioutil.ReadFile(test.expOutputFile)
+			expOutput, err := os.ReadFile(test.expOutputFile)
 			if err != nil {
 				t.Fatalf("%s: %s", test.expOutputFile, err)
 			}

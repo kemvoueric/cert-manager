@@ -23,21 +23,24 @@ import (
 
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmacmeclientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
-	cmacmelisters "github.com/jetstack/cert-manager/pkg/client/listers/acme/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	issuerpkg "github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmacmeclientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
+	cmacmelisters "github.com/cert-manager/cert-manager/pkg/client/listers/acme/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	issuerpkg "github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/go-logr/logr"
 )
 
 const (
@@ -57,28 +60,49 @@ type ACME struct {
 	acmeClientV cmacmeclientset.AcmeV1Interface
 
 	reporter *crutil.Reporter
+
+	// fieldManager is the manager name used for Create and Apply operations.
+	fieldManager string
 }
 
 func init() {
 	// create certificate request controller for acme issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		// watch owned Order resources and trigger resyncs of CertificateRequests
-		// that own Orders automatically
-		orderInformer := ctx.SharedInformerFactory.Acme().V1().Orders().Informer()
+		// that own Orders automatically.
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerACME, NewACME(ctx), orderInformer)).
+			For(certificaterequests.New(
+				apiutil.IssuerACME,
+				NewACME,
+				func(ctx *controllerpkg.Context, log logr.Logger, queue workqueue.RateLimitingInterface) ([]cache.InformerSynced, error) {
+					orderInformer := ctx.SharedInformerFactory.Acme().V1().Orders().Informer()
+					certificateRequestLister := ctx.SharedInformerFactory.Certmanager().V1().CertificateRequests().Lister()
+
+					orderInformer.AddEventHandler(&controllerpkg.BlockingEventHandler{
+						WorkFunc: controllerpkg.HandleOwnedResourceNamespacedFunc(
+							log, queue,
+							cmapi.SchemeGroupVersion.WithKind(cmapi.CertificateRequestKind),
+							func(namespace, name string) (interface{}, error) {
+								return certificateRequestLister.CertificateRequests(namespace).Get(name)
+							},
+						),
+					})
+					return []cache.InformerSynced{orderInformer.HasSynced}, nil
+				},
+			)).
 			Complete()
 	})
 }
 
 // NewACME returns a configured controller.
-func NewACME(ctx *controllerpkg.Context) *ACME {
+func NewACME(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &ACME{
 		recorder:      ctx.Recorder,
 		issuerOptions: ctx.IssuerOptions,
 		orderLister:   ctx.SharedInformerFactory.Acme().V1().Orders().Lister(),
 		acmeClientV:   ctx.CMClient.AcmeV1(),
 		reporter:      crutil.NewReporter(ctx.Clock, ctx.Recorder),
+		fieldManager:  ctx.FieldManager,
 	}
 }
 
@@ -88,7 +112,7 @@ func NewACME(ctx *controllerpkg.Context) *ACME {
 // and sent back to the Kubernetes API server for processing.
 // The order controller then processes the order. The CertificateRequest
 // is then updated with the result.
-func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.GenericIssuer) (*issuerpkg.IssueResponse, error) {
+func (a *ACME) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuer cmapi.GenericIssuer) (*issuerpkg.IssueResponse, error) {
 	log := logf.FromContext(ctx, "sign")
 
 	// If we can't decode the CSR PEM we have to hard fail
@@ -129,7 +153,7 @@ func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.Ge
 	if k8sErrors.IsNotFound(err) {
 		// Failing to create the order here is most likely network related.
 		// We should backoff and keep trying.
-		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(ctx, expectedOrder, metav1.CreateOptions{})
+		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(ctx, expectedOrder, metav1.CreateOptions{FieldManager: a.fieldManager})
 		if err != nil {
 			message := fmt.Sprintf("Failed create new order resource %s/%s", expectedOrder.Namespace, expectedOrder.Name)
 
@@ -215,7 +239,7 @@ func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.Ge
 }
 
 // Build order. If we error here it is a terminating failure.
-func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableDurationFeature bool) (*cmacme.Order, error) {
+func buildOrder(cr *cmapi.CertificateRequest, csr *x509.CertificateRequest, enableDurationFeature bool) (*cmacme.Order, error) {
 	var ipAddresses []string
 	for _, ip := range csr.IPAddresses {
 		ipAddresses = append(ipAddresses, ip.String())
@@ -272,7 +296,7 @@ func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableD
 			// Annotations include the filtered annotations copied from the Certificate.
 			Annotations: cr.Annotations,
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(cr, v1.SchemeGroupVersion.WithKind(v1.CertificateRequestKind)),
+				*metav1.NewControllerRef(cr, cmapi.SchemeGroupVersion.WithKind(cmapi.CertificateRequestKind)),
 			},
 		},
 		Spec: spec,

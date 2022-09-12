@@ -29,15 +29,15 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
 
-	"github.com/jetstack/cert-manager/pkg/acme/accounts"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	cmacmelisters "github.com/jetstack/cert-manager/pkg/client/listers/acme/v1"
-	cmlisters "github.com/jetstack/cert-manager/pkg/client/listers/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/scheduler"
+	"github.com/cert-manager/cert-manager/pkg/acme/accounts"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	cmacmelisters "github.com/cert-manager/cert-manager/pkg/client/listers/acme/v1"
+	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/scheduler"
 )
 
 var keyFunc = controllerpkg.KeyFunc
@@ -63,6 +63,9 @@ type controller struct {
 	// clientset used to update cert-manager API resources
 	cmClient cmclient.Interface
 
+	// fieldManager is the manager name used for the Apply operations on Secrets.
+	fieldManager string
+
 	// maintain a reference to the workqueue for this controller
 	// so the handleOwnedResource method can enqueue resources
 	queue workqueue.RateLimitingInterface
@@ -84,6 +87,7 @@ func NewController(
 	recorder record.EventRecorder,
 	clock clock.Clock,
 	isNamespaced bool,
+	fieldManager string,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 
 	// Create a queue used to queue up Orders to be processed.
@@ -153,18 +157,12 @@ func NewController(
 		recorder:            recorder,
 		cmClient:            cmClient,
 		accountRegistry:     accountRegistry,
+		fieldManager:        fieldManager,
 	}, queue, mustSync
 
 }
 
 func (c *controller) ProcessItem(ctx context.Context, key string) error {
-	// We don't want to leak goroutines, so let's remove this key from the
-	// scheduled queue in case it has been scheduled. We only need to
-	// un-schedule the key for 'Deleted' events, but ProcessItem does not allow
-	// us to distinguish between 'Added', 'Updated' and 'Deleted'. Note that
-	// there is no unit test around this.
-	c.scheduledWorkQueue.Forget(key)
-
 	log := logf.FromContext(ctx)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -224,6 +222,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 		ctx.Recorder,
 		ctx.Clock,
 		isNamespaced,
+		ctx.FieldManager,
 	)
 	c.controller = ctrl
 
@@ -231,7 +230,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 }
 
 func init() {
-	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, ControllerName).
 			For(&controllerWrapper{}).
 			Complete()

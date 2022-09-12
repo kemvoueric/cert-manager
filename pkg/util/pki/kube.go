@@ -23,9 +23,9 @@ import (
 
 	certificatesv1 "k8s.io/api/certificates/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	experimentalapi "github.com/jetstack/cert-manager/pkg/apis/experimental/v1alpha1"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	experimentalapi "github.com/cert-manager/cert-manager/pkg/apis/experimental/v1alpha1"
 )
 
 // GenerateTemplateFromCertificateSigningRequest will create an
@@ -48,12 +48,18 @@ func GenerateTemplateFromCertificateSigningRequest(csr *certificatesv1.Certifica
 
 // DurationFromCertificateSigningRequest returns the duration that the user may
 // have requested using the annotation
-// "experimental.cert-manager.io/request-duration".
+// "experimental.cert-manager.io/request-duration" or via the CSR
+// spec.expirationSeconds field (the annotation is preferred since it predates
+// the field which is only available in Kubernetes v1.22+).
 // Returns the cert-manager default certificate duration when the user hasn't
-// provided the annotation.
+// provided the annotation or spec.expirationSeconds.
 func DurationFromCertificateSigningRequest(csr *certificatesv1.CertificateSigningRequest) (time.Duration, error) {
 	requestedDuration, ok := csr.Annotations[experimentalapi.CertificateSigningRequestDurationAnnotationKey]
 	if !ok {
+		if csr.Spec.ExpirationSeconds != nil {
+			return time.Duration(*csr.Spec.ExpirationSeconds) * time.Second, nil
+		}
+
 		// The user may not have set a duration annotation. Use the default
 		// duration in this case.
 		return cmapi.DefaultCertificateDuration, nil
@@ -68,6 +74,7 @@ func DurationFromCertificateSigningRequest(csr *certificatesv1.CertificateSignin
 	return duration, nil
 }
 
+// BuildKeyUsagesKube returns a key usage and extended key usage of the x509 certificate
 func BuildKeyUsagesKube(usages []certificatesv1.KeyUsage) (x509.KeyUsage, []x509.ExtKeyUsage, error) {
 	var unk []certificatesv1.KeyUsage
 	if len(usages) == 0 {

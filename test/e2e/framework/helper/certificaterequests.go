@@ -29,22 +29,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 // WaitForCertificateRequestReady waits for the CertificateRequest resource to
 // enter a Ready state.
 func (h *Helper) WaitForCertificateRequestReady(ns, name string, timeout time.Duration) (*cmapi.CertificateRequest, error) {
 	var cr *cmapi.CertificateRequest
+	logf, done := log.LogBackoff()
+	defer done()
 	err := wait.PollImmediate(time.Second, timeout,
 		func() (bool, error) {
 			var err error
-			log.Logf("Waiting for CertificateRequest %s to be ready", name)
+			logf("Waiting for CertificateRequest %s to be ready", name)
 			cr, err = h.CMClient.CertmanagerV1().CertificateRequests(ns).Get(context.TODO(), name, metav1.GetOptions{})
 			if err != nil {
 				return false, fmt.Errorf("error getting CertificateRequest %s: %v", name, err)
@@ -54,7 +56,7 @@ func (h *Helper) WaitForCertificateRequestReady(ns, name string, timeout time.Du
 				Status: cmmeta.ConditionTrue,
 			})
 			if !isReady {
-				log.Logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
+				logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
 				return false, nil
 			}
 			return true, nil

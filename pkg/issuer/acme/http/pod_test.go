@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	coretesting "k8s.io/client-go/testing"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 )
 
 func TestEnsurePod(t *testing.T) {
@@ -317,7 +317,8 @@ func TestMergePodObjectMetaWithPodTemplate(t *testing.T) {
 					"foo":                     "bar",
 				}
 				resultingPod.Spec.NodeSelector = map[string]string{
-					"node": "selector",
+					"kubernetes.io/os": "linux",
+					"node":             "selector",
 				}
 				resultingPod.Spec.Tolerations = []corev1.Toleration{
 					{

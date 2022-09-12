@@ -22,21 +22,21 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
-	. "github.com/jetstack/cert-manager/test/e2e/framework/matcher"
-	"github.com/jetstack/cert-manager/test/e2e/util"
-	e2eutil "github.com/jetstack/cert-manager/test/e2e/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	. "github.com/cert-manager/cert-manager/test/e2e/framework/matcher"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func() {
@@ -218,16 +218,18 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 		By("killing the solver pod")
 		podClient := f.KubeClientSet.CoreV1().Pods(f.Namespace.Name)
 		var pod corev1.Pod
-		err = wait.PollImmediate(1*time.Second, time.Minute,
+		logf, done := log.LogBackoff()
+		defer done()
+		err = wait.PollImmediate(1*time.Second, time.Minute*3,
 			func() (bool, error) {
-				log.Logf("Waiting for solver pod to exist")
+				logf("Waiting for solver pod to exist")
 				podlist, err := podClient.List(context.TODO(), metav1.ListOptions{})
 				if err != nil {
 					return false, err
 				}
 
 				for _, p := range podlist.Items {
-					log.Logf("solver pod %s", p.Name)
+					logf("solver pod %s", p.Name)
 					// TODO(dmo): make this cleaner instead of just going by name
 					if strings.Contains(p.Name, "http-solver") {
 						pod = p

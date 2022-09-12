@@ -21,15 +21,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
-	pkgutil "github.com/jetstack/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
 )
 
 // CloudFlareAPIURL represents the API endpoint to call.
 // TODO: Unexport?
 const CloudFlareAPIURL = "https://api.cloudflare.com/client/v4"
 
-// Mockable Interface
+// DNSProviderType is the Mockable Interface
 type DNSProviderType interface {
 	makeRequest(method, uri string, body io.Reader) (json.RawMessage, error)
 }
@@ -40,6 +39,8 @@ type DNSProvider struct {
 	authEmail        string
 	authKey          string
 	authToken        string
+
+	userAgent string
 }
 
 // DNSZone is the Zone-Record returned from Cloudflare (we`ll ignore everything we don't need)
@@ -52,15 +53,15 @@ type DNSZone struct {
 // NewDNSProvider returns a DNSProvider instance configured for cloudflare.
 // Credentials must be passed in the environment variables: CLOUDFLARE_EMAIL
 // and CLOUDFLARE_API_KEY.
-func NewDNSProvider(dns01Nameservers []string) (*DNSProvider, error) {
+func NewDNSProvider(dns01Nameservers []string, userAgent string) (*DNSProvider, error) {
 	email := os.Getenv("CLOUDFLARE_EMAIL")
 	key := os.Getenv("CLOUDFLARE_API_KEY")
-	return NewDNSProviderCredentials(email, key, "", dns01Nameservers)
+	return NewDNSProviderCredentials(email, key, "", dns01Nameservers, userAgent)
 }
 
 // NewDNSProviderCredentials uses the supplied credentials to return a
 // DNSProvider instance configured for cloudflare.
-func NewDNSProviderCredentials(email, key, token string, dns01Nameservers []string) (*DNSProvider, error) {
+func NewDNSProviderCredentials(email, key, token string, dns01Nameservers []string, userAgent string) (*DNSProvider, error) {
 	if (email == "" && key != "") || (key == "" && token == "") {
 		return nil, fmt.Errorf("no Cloudflare credential has been given (can be either an API key or an API token)")
 	}
@@ -86,14 +87,17 @@ func NewDNSProviderCredentials(email, key, token string, dns01Nameservers []stri
 		authKey:          key,
 		authToken:        token,
 		dns01Nameservers: dns01Nameservers,
+		userAgent:        userAgent,
 	}, nil
 }
 
-// This will try to traverse the official Cloudflare API to find the nearest valid Zone.
+// FindNearestZoneForFQDN will try to traverse the official Cloudflare API to find the nearest valid Zone.
 // It's a replacement for /pkg/issuer/acme/dns/util/wait.go#FindZoneByFqdn
-//  example.com.                                   ← Zone-Record found for the SLD (in most cases)
-//  └── foo.example.com.                           ← Zone-Record could be possibly here, but in this case not.
-//      └── _acme-challenge.foo.example.com.       ← Starting point, the FQDN.
+//
+//	example.com.                                   ← Zone-Record found for the SLD (in most cases)
+//	└── foo.example.com.                           ← Zone-Record could be possibly here, but in this case not.
+//	    └── _acme-challenge.foo.example.com.       ← Starting point, the FQDN.
+//
 // It will try to call the API for each branch (from bottom to top) and see if there's a Zone-Record returned.
 // Calling See https://api.cloudflare.com/#zone-list-zones
 func FindNearestZoneForFQDN(c DNSProviderType, fqdn string) (DNSZone, error) {
@@ -102,6 +106,7 @@ func FindNearestZoneForFQDN(c DNSProviderType, fqdn string) (DNSZone, error) {
 	}
 	mappedFQDN := strings.Split(fqdn, ".")
 	nextName := util.UnFqdn(fqdn) //remove the trailing dot
+	var lastErr error
 	for i := 0; i < len(mappedFQDN)-1; i++ {
 		var from, to = len(mappedFQDN[i]) + 1, len(nextName)
 		if from > to {
@@ -111,8 +116,10 @@ func FindNearestZoneForFQDN(c DNSProviderType, fqdn string) (DNSZone, error) {
 			nextName = string([]rune(nextName)[from:to])
 			continue
 		}
+		lastErr = nil
 		result, err := c.makeRequest("GET", "/zones?name="+nextName, nil)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		var zones []DNSZone
@@ -126,7 +133,10 @@ func FindNearestZoneForFQDN(c DNSProviderType, fqdn string) (DNSZone, error) {
 		}
 		nextName = string([]rune(nextName)[from:to])
 	}
-	return DNSZone{}, fmt.Errorf("Found no Zones for domain %s (neither in the sub-domain noir in the SLD) please make sure your domain-entries in the config are correct and the API is correctly setup with Zone.read rights.", fqdn)
+	if lastErr != nil {
+		return DNSZone{}, fmt.Errorf("while attempting to find Zones for domain %s\n%s", fqdn, lastErr)
+	}
+	return DNSZone{}, fmt.Errorf("Found no Zones for domain %s (neither in the sub-domain nor in the SLD) please make sure your domain-entries in the config are correct and the API key is correctly setup with Zone.read rights.", fqdn)
 }
 
 // Present creates a TXT record to fulfil the dns-01 challenge
@@ -260,7 +270,7 @@ func (c *DNSProvider) makeRequest(method, uri string, body io.Reader) (json.RawM
 	} else {
 		req.Header.Set("X-Auth-Key", c.authKey)
 	}
-	req.Header.Set("User-Agent", pkgutil.CertManagerUserAgent)
+	req.Header.Set("User-Agent", c.userAgent)
 
 	client := http.Client{
 		Timeout: 30 * time.Second,

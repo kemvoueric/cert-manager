@@ -19,31 +19,35 @@ package venafi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/go-logr/logr"
+
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
 
 	corelisters "k8s.io/client-go/listers/core/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/controller"
-	controllertest "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client"
-	internalvenafifake "github.com/jetstack/cert-manager/pkg/issuer/venafi/client/fake"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	controllertest "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
+	internalvenafifake "github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/fake"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 func TestSetup(t *testing.T) {
 	baseIssuer := gen.Issuer("test-issuer")
 
 	failingClientBuilder := func(string, corelisters.SecretLister,
-		cmapi.GenericIssuer) (client.Interface, error) {
+		cmapi.GenericIssuer, *metrics.Metrics, logr.Logger) (client.Interface, error) {
 		return nil, errors.New("this is an error")
 	}
 
 	failingPingClient := func(string, corelisters.SecretLister,
-		cmapi.GenericIssuer) (client.Interface, error) {
+		cmapi.GenericIssuer, *metrics.Metrics, logr.Logger) (client.Interface, error) {
 		return &internalvenafifake.Venafi{
 			PingFn: func() error {
 				return errors.New("this is a ping error")
@@ -52,10 +56,32 @@ func TestSetup(t *testing.T) {
 	}
 
 	pingClient := func(string, corelisters.SecretLister,
-		cmapi.GenericIssuer) (client.Interface, error) {
+		cmapi.GenericIssuer, *metrics.Metrics, logr.Logger) (client.Interface, error) {
 		return &internalvenafifake.Venafi{
 			PingFn: func() error {
 				return nil
+			},
+		}, nil
+	}
+
+	verifyCredentialsClient := func(string, corelisters.SecretLister, cmapi.GenericIssuer, *metrics.Metrics, logr.Logger) (client.Interface, error) {
+		return &internalvenafifake.Venafi{
+			PingFn: func() error {
+				return nil
+			},
+			VerifyCredentialsFn: func() error {
+				return nil
+			},
+		}, nil
+	}
+
+	failingVerifyCredentialsClient := func(string, corelisters.SecretLister, cmapi.GenericIssuer, *metrics.Metrics, logr.Logger) (client.Interface, error) {
+		return &internalvenafifake.Venafi{
+			PingFn: func() error {
+				return nil
+			},
+			VerifyCredentialsFn: func() error {
+				return fmt.Errorf("401 Unauthorized")
 			},
 		}, nil
 	}
@@ -94,6 +120,30 @@ func TestSetup(t *testing.T) {
 			},
 			expectedEvents: []string{
 				"Normal Ready Verified issuer with Venafi server",
+			},
+		},
+		"verifyCredentials happy path": {
+			clientBuilder: verifyCredentialsClient,
+			iss:           baseIssuer.DeepCopy(),
+			expectedErr:   false,
+			expectedCondition: &cmapi.IssuerCondition{
+				Message: "Venafi issuer started",
+				Reason:  "Venafi issuer started",
+				Status:  "True",
+			},
+			expectedEvents: []string{
+				"Normal Ready Verified issuer with Venafi server",
+			},
+		},
+
+		"if verifyCredentials returns an error we should set condition to False": {
+			clientBuilder: failingVerifyCredentialsClient,
+			iss:           baseIssuer.DeepCopy(),
+			expectedErr:   true,
+			expectedCondition: &cmapi.IssuerCondition{
+				Reason:  "ErrorSetup",
+				Message: "Failed to setup Venafi issuer: client.VerifyCredentials: 401 Unauthorized",
+				Status:  "False",
 			},
 		},
 	}

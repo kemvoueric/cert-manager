@@ -34,9 +34,9 @@ import (
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/install/helm"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/install/helm"
 )
 
 type InstallOptions struct {
@@ -47,6 +47,7 @@ type InstallOptions struct {
 
 	ChartName string
 	DryRun    bool
+	Wait      bool
 
 	genericclioptions.IOStreams
 }
@@ -56,27 +57,28 @@ const (
 	defaultCertManagerNamespace = "cert-manager"
 )
 
-const installDesc = `
-This command installs cert-manager. It uses the Helm libraries to do so.
+func installDesc() string {
+	return build.WithTemplate(`This command installs cert-manager. It uses the Helm libraries to do so.
 
 The latest published cert-manager chart in the "https://charts.jetstack.io" repo is used.
 Most of the features supported by 'helm install' are also supported by this command.
-In addition, his command will always correctly install the required CRD resources.
+In addition, this command will always correctly install the required CRD resources.
 
 Some example uses:
-	$ kubectl cert-manager x install
+	$ {{.BuildName}} x install
 or
-	$ kubectl cert-manager x install -n new-cert-manager
+	$ {{.BuildName}} x install -n new-cert-manager
 or
-	$ kubectl cert-manager x install --version v1.4.0
+	$ {{.BuildName}} x install --version v1.4.0
 or
-	$ kubectl cert-manager x install --set prometheus.enabled=false
+	$ {{.BuildName}} x install --set prometheus.enabled=false
 
 To override values in the cert-manager chart, use either the '--values' flag and
 pass in a file or use the '--set' flag and pass configuration from the command line.
-`
+`)
+}
 
-func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams, factory cmdutil.Factory) *cobra.Command {
+func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	settings := cli.New()
 	cfg := new(action.Configuration)
 
@@ -89,19 +91,11 @@ func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams, f
 		IOStreams: ioStreams,
 	}
 
-	// Set default namespace cli flag value
-	defaults := map[string]string{
-		"namespace": defaultCertManagerNamespace,
-	}
-
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install cert-manager",
-		Long:  installDesc,
+		Long:  installDesc(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := helm.CopyCliFlags(cmd.Root().PersistentFlags(), defaults, settings); err != nil {
-				return err
-			}
 			options.client.Namespace = settings.Namespace()
 
 			rel, err := options.runInstall(ctx)
@@ -121,7 +115,21 @@ func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams, f
 		SilenceErrors: true,
 	}
 
-	addInstallUninstallFlags(cmd.Flags(), &options.client.Timeout, &options.client.Wait)
+	settings.AddFlags(cmd.Flags())
+
+	// The Helm cli.New function does not provide an easy way to
+	// override the default of the namespace flag.
+	// See https://github.com/helm/helm/issues/9790
+	//
+	// Here we set the default value shown in the usage message.
+	cmd.Flag("namespace").DefValue = defaultCertManagerNamespace
+	// Here we set the default value.
+	// The returned error is ignored because
+	// pflag.stringValue.Set always returns a nil.
+	cmd.Flag("namespace").Value.Set(defaultCertManagerNamespace)
+
+	addInstallUninstallFlags(cmd.Flags(), &options.client.Timeout, &options.Wait)
+
 	addInstallFlags(cmd.Flags(), options.client)
 	addValueOptionsFlags(cmd.Flags(), options.valueOpts)
 	addChartPathOptionsFlags(cmd.Flags(), &options.client.ChartPathOptions)
@@ -135,18 +143,19 @@ func NewCmdInstall(ctx context.Context, ioStreams genericclioptions.IOStreams, f
 	return cmd
 }
 
-// The overall strategy is to install the CRDs first, and not as part of a Helm release,
-// and then to install a Helm release without the CRDs.
-// This is to ensure that CRDs are not removed by a subsequent helm uninstall or by a
-// future kubectl cert-manager uninstall. We want the removal of CRDs to only be performed
-// by an administrator who understands that the consequences of removing CRDs will be the
-// garbage collection of all the related CRs in the cluster.
-// We first do a dry-run install of the chart (effectively helm template --validate=false) to
-// render the CRDs from the CRD templates in the Chart. The ClientOnly option is required,
-// otherwise Helm will return an error in case the CRDs are already installed in the cluster.
-// We then extract the CRDs from the resulting dry-run manifests and install those first.
-// Finally, we perform a helm install to install the remaining non-CRD resources and wait for
-// those to be "Ready".
+// The overall strategy is to install the CRDs first, and not as part of a Helm
+// release, and then to install a Helm release without the CRDs.  This is to
+// ensure that CRDs are not removed by a subsequent helm uninstall or by a
+// future cmctl uninstall. We want the removal of CRDs to only be performed by
+// an administrator who understands that the consequences of removing CRDs will
+// be the garbage collection of all the related CRs in the cluster.  We first
+// do a dry-run install of the chart (effectively helm template
+// --validate=false) to render the CRDs from the CRD templates in the Chart.
+// The ClientOnly option is required, otherwise Helm will return an error in
+// case the CRDs are already installed in the cluster.  We then extract the
+// CRDs from the resulting dry-run manifests and install those first.  Finally,
+// we perform a helm install to install the remaining non-CRD resources and
+// wait for those to be "Ready".
 // This creates a Helm "release" artifact in a Secret in the target namespace, which contains
 // a record of all the resources installed by Helm (except the CRDs).
 func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, error) {
@@ -230,12 +239,18 @@ func (o *InstallOptions) runInstall(ctx context.Context) (*release.Release, erro
 	// Install chart
 	o.client.DryRun = false     // Apply DryRun cli flags
 	o.client.ClientOnly = false // Perform install against cluster
-	// 'Atomic=True' means that if part of the install fails, all resource installs are reverted;
-	// Helm supports 3 diffent combinations of the (Atomic, Wait) boolean couple:
-	// (False, False), (False, True) or (True, True)
-	// For simplicity, we want do not support Waiting without the Atomic option (False, True),
-	// this allows this cli to use a single --wait=(True|False) flag
-	o.client.Atomic = o.client.Wait
+
+	o.client.Wait = o.Wait // Wait for resources to be ready
+	// If part of the install fails and the Atomic option is set to True,
+	// all resource installs are reverted. Atomic cannot be enabled without
+	// waiting (if Atomic=True is set, the value for Wait is overwritten with True),
+	// so only enable Atomic if we are waiting.
+	o.client.Atomic = o.Wait
+	// The cert-manager chart currently has only a startupapicheck hook,
+	// if waiting is disabled, this hook should be disabled too; otherwise
+	// the hook will still wait for the installation to succeed.
+	o.client.DisableHooks = !o.Wait
+
 	chartValues[installCRDsFlagName] = false // Do not render CRDs, as this might cause problems when uninstalling using helm
 
 	return o.client.Run(chart, chartValues)

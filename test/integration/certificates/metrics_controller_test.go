@@ -19,7 +19,7 @@ package certificates
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -32,28 +32,36 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	controllermetrics "github.com/jetstack/cert-manager/pkg/controller/certificates/metrics"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/metrics"
-	"github.com/jetstack/cert-manager/test/integration/framework"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	controllermetrics "github.com/cert-manager/cert-manager/pkg/controller/certificates/metrics"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+	"github.com/cert-manager/cert-manager/test/integration/framework"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var (
-	fixedClock  = fakeclock.NewFakeClock(time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
-	clockMetric = fmt.Sprintf(`# HELP certmanager_clock_time_seconds The clock time given in seconds (from 1970/01/01 UTC).
+	fixedClock = fakeclock.NewFakeClock(time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
+
+	clockCounterMetric = fmt.Sprintf(`# HELP certmanager_clock_time_seconds DEPRECATED: use clock_time_seconds_gauge instead. The clock time given in seconds (from 1970/01/01 UTC).
 # TYPE certmanager_clock_time_seconds counter
 certmanager_clock_time_seconds %.9e`, float64(fixedClock.Now().Unix()))
+	clockGaugeMetric = fmt.Sprintf(`
+# HELP certmanager_clock_time_seconds_gauge The clock time given in seconds (from 1970/01/01 UTC).
+# TYPE certmanager_clock_time_seconds_gauge gauge
+certmanager_clock_time_seconds_gauge %.9e`, float64(fixedClock.Now().Unix()))
 )
 
 // TestMetricscontoller performs a basic test to ensure that Certificates
 // metrics are exposed when a Certificate is created, updated, and removed when
 // it is deleted.
 func TestMetricsController(t *testing.T) {
-	config, stopFn := framework.RunControlPlane(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*40)
+	defer cancel()
+
+	config, stopFn := framework.RunControlPlane(t, ctx)
 	defer stopFn()
 
 	// Build, instantiate and run the issuing controller.
@@ -65,26 +73,31 @@ func TestMetricsController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := metricsHandler.NewServer(ln, false)
+	server := metricsHandler.NewServer(ln)
 
+	errCh := make(chan error)
 	go func() {
+		defer close(errCh)
 		if err := server.Serve(ln); err != http.ErrServerClosed {
-			t.Fatal(err)
+			errCh <- err
 		}
 	}()
-
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 		defer cancel()
 
-		if err := server.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Fatal(err)
+		}
+		err := <-errCh
+		if err != nil {
 			t.Fatal(err)
 		}
 	}()
 
 	ctrl, queue, mustSync := controllermetrics.NewController(factory, cmFactory, metricsHandler)
 	c := controllerpkg.NewController(
-		context.Background(),
+		ctx,
 		"metrics_test",
 		metricsHandler,
 		ctrl.ProcessItem,
@@ -94,9 +107,6 @@ func TestMetricsController(t *testing.T) {
 	)
 	stopController := framework.StartInformersAndController(t, factory, cmFactory, c)
 	defer stopController()
-
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*20)
-	defer cancel()
 
 	var (
 		crtName         = "testcrt"
@@ -108,7 +118,7 @@ func TestMetricsController(t *testing.T) {
 
 	// Create Namespace
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
-	_, err = kubernetesCl.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
+	_, err = kubernetesCl.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +129,7 @@ func TestMetricsController(t *testing.T) {
 			return err
 		}
 
-		output, err := ioutil.ReadAll(resp.Body)
+		output, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}
@@ -133,21 +143,21 @@ func TestMetricsController(t *testing.T) {
 	}
 
 	waitForMetrics := func(expectedOutput string) {
-		err := wait.Poll(time.Millisecond*100, time.Second*5, func() (done bool, err error) {
+		err := wait.PollImmediateUntil(time.Millisecond*100, func() (done bool, err error) {
 			if err := testMetrics(expectedOutput); err != nil {
 				lastErr = err
 				return false, nil
 			}
 
 			return true, nil
-		})
+		}, ctx.Done())
 		if err != nil {
 			t.Fatalf("%s: failed to wait for expected metrics to be exposed: %s", err, lastErr)
 		}
 	}
 
 	// Should expose no additional metrics
-	waitForMetrics(clockMetric)
+	waitForMetrics(clockCounterMetric + clockGaugeMetric)
 
 	// Create Certificate
 	crt := gen.Certificate(crtName,
@@ -172,7 +182,10 @@ certmanager_certificate_expiration_timestamp_seconds{name="testcrt",namespace="t
 certmanager_certificate_ready_status{condition="False",name="testcrt",namespace="testns"} 0
 certmanager_certificate_ready_status{condition="True",name="testcrt",namespace="testns"} 0
 certmanager_certificate_ready_status{condition="Unknown",name="testcrt",namespace="testns"} 1
-` + clockMetric + `
+# HELP certmanager_certificate_renewal_timestamp_seconds The number of seconds before expiration time the certificate should renew.
+# TYPE certmanager_certificate_renewal_timestamp_seconds gauge
+certmanager_certificate_renewal_timestamp_seconds{name="testcrt",namespace="testns"} 0
+` + clockCounterMetric + clockGaugeMetric + `
 # HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller.
 # TYPE certmanager_controller_sync_call_count counter
 certmanager_controller_sync_call_count{controller="metrics_test"} 1
@@ -188,6 +201,9 @@ certmanager_controller_sync_call_count{controller="metrics_test"} 1
 			Status: cmmeta.ConditionTrue,
 		},
 	}
+	crt.Status.RenewalTime = &metav1.Time{
+		Time: time.Unix(100, 0),
+	}
 	_, err = cmClient.CertmanagerV1().Certificates(namespace).UpdateStatus(ctx, crt, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +218,10 @@ certmanager_certificate_expiration_timestamp_seconds{name="testcrt",namespace="t
 certmanager_certificate_ready_status{condition="False",name="testcrt",namespace="testns"} 0
 certmanager_certificate_ready_status{condition="True",name="testcrt",namespace="testns"} 1
 certmanager_certificate_ready_status{condition="Unknown",name="testcrt",namespace="testns"} 0
-` + clockMetric + `
+# HELP certmanager_certificate_renewal_timestamp_seconds The number of seconds before expiration time the certificate should renew.
+# TYPE certmanager_certificate_renewal_timestamp_seconds gauge
+certmanager_certificate_renewal_timestamp_seconds{name="testcrt",namespace="testns"} 100
+` + clockCounterMetric + clockGaugeMetric + `
 # HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller.
 # TYPE certmanager_controller_sync_call_count counter
 certmanager_controller_sync_call_count{controller="metrics_test"} 2
@@ -214,7 +233,7 @@ certmanager_controller_sync_call_count{controller="metrics_test"} 2
 	}
 
 	// Should expose no Certificates and only metrics sync count increase
-	waitForMetrics(clockMetric + `
+	waitForMetrics(clockCounterMetric + clockGaugeMetric + `
 # HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller.
 # TYPE certmanager_controller_sync_call_count counter
 certmanager_controller_sync_call_count{controller="metrics_test"} 3

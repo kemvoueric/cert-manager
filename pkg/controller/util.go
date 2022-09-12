@@ -22,13 +22,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 var (
@@ -74,13 +75,20 @@ func HandleOwnedResourceNamespacedFunc(log logr.Logger, queue workqueue.RateLimi
 			}
 
 			if refGV.Group == ownerGVK.Group && ref.Kind == ownerGVK.Kind {
-				// TODO: how to handle namespace of owner references?
-				order, err := get(metaobj.GetNamespace(), ref.Name)
-				if err != nil {
-					log.Error(err, "error getting referenced owning resource")
+				obj, err := get(metaobj.GetNamespace(), ref.Name)
+				// This function is always called with a getter
+				// that gets from informers cache. Because this
+				// is also called on cache sync it may be that
+				// the owner is not yet in the cache.
+				if err != nil && errors.IsNotFound(err) {
+					log.Info("owning resource not found in cache")
 					continue
 				}
-				objKey, err := KeyFunc(order)
+				if err != nil {
+					log.Error(err, "error getting referenced owning resource from cache")
+					continue
+				}
+				objKey, err := KeyFunc(obj)
 				if err != nil {
 					log.Error(err, "error computing key for resource")
 					continue

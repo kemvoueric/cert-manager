@@ -28,8 +28,8 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/utils/pointer"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func podLabels(ch *cmacme.Challenge) map[string]string {
@@ -40,7 +40,7 @@ func podLabels(ch *cmacme.Challenge) map[string]string {
 		// TODO: we need to support domains longer than 63 characters
 		// this value should probably be hashed, and then the full plain text
 		// value stored as an annotation to make it easier for users to read
-		// see #425 for details: https://github.com/jetstack/cert-manager/issues/425
+		// see #425 for details: https://github.com/cert-manager/cert-manager/issues/425
 		cmacme.DomainLabelKey:               domainHash,
 		cmacme.TokenLabelKey:                tokenHash,
 		cmacme.SolverIdentificationLabelKey: solverIdent,
@@ -145,15 +145,22 @@ func (s *Solver) buildPod(ch *cmacme.Challenge) *corev1.Pod {
 	pod := s.buildDefaultPod(ch)
 
 	// Override defaults if they have changed in the pod template.
-	if ch.Spec.Solver.HTTP01 != nil &&
-		ch.Spec.Solver.HTTP01.Ingress != nil {
-		pod = s.mergePodObjectMetaWithPodTemplate(pod,
-			ch.Spec.Solver.HTTP01.Ingress.PodTemplate)
+	if ch.Spec.Solver.HTTP01 != nil {
+		if ch.Spec.Solver.HTTP01.Ingress != nil {
+			pod = s.mergePodObjectMetaWithPodTemplate(pod,
+				ch.Spec.Solver.HTTP01.Ingress.PodTemplate)
+		}
 	}
 
 	return pod
 }
 
+// Note: this function builds pod spec using defaults and any configuration
+// options passed via flags to cert-manager controller.
+// Solver pod configuration via flags is a now deprecated
+// mechanism- please use pod template instead when adding any new
+// configuration options
+// https://github.com/cert-manager/cert-manager/blob/f1d7c432763100c3fb6eb6a1654d29060b479b3c/pkg/apis/acme/v1/types_issuer.go#L270
 func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 	podLabels := podLabels(ch)
 
@@ -168,9 +175,15 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ch, challengeGvk)},
 		},
 		Spec: corev1.PodSpec{
+			NodeSelector: map[string]string{
+				"kubernetes.io/os": "linux",
+			},
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: pointer.BoolPtr(true),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
 			},
 			Containers: []corev1.Container{
 				{
@@ -199,6 +212,12 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 						{
 							Name:          "http",
 							ContainerPort: acmeSolverListenPort,
+						},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: pointer.BoolPtr(false),
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
 						},
 					},
 				},

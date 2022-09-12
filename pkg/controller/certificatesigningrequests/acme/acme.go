@@ -22,27 +22,30 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/go-logr/logr"
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	certificatesclient "k8s.io/client-go/kubernetes/typed/certificates/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmacmeclientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
-	cmacmelisters "github.com/jetstack/cert-manager/pkg/client/listers/acme/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests"
-	ctrlutil "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/util"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	cmacmeclientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
+	cmacmelisters "github.com/cert-manager/cert-manager/pkg/client/listers/acme/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests"
+	ctrlutil "github.com/cert-manager/cert-manager/pkg/controller/certificatesigningrequests/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 const (
@@ -62,21 +65,40 @@ type ACME struct {
 	recorder record.EventRecorder
 
 	copiedAnnotationPrefixes []string
+
+	// fieldManager is the manager name used for Create and Apply operations.
+	fieldManager string
 }
 
 func init() {
-	controllerpkg.Register(CSRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CSRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CSRControllerName).
-			For(controllerBuilder(ctx)).
+			For(controllerBuilder()).
 			Complete()
 	})
 }
 
-func controllerBuilder(ctx *controllerpkg.Context) *certificatesigningrequests.Controller {
-	return certificatesigningrequests.New(apiutil.IssuerACME, NewACME(ctx), ctx.SharedInformerFactory.Acme().V1().Orders().Informer())
+func controllerBuilder() *certificatesigningrequests.Controller {
+	return certificatesigningrequests.New(apiutil.IssuerACME, NewACME,
+		func(ctx *controllerpkg.Context, log logr.Logger, queue workqueue.RateLimitingInterface) ([]cache.InformerSynced, error) {
+			orderInformer := ctx.SharedInformerFactory.Acme().V1().Orders().Informer()
+			csrLister := ctx.KubeSharedInformerFactory.Certificates().V1().CertificateSigningRequests().Lister()
+
+			orderInformer.AddEventHandler(&controllerpkg.BlockingEventHandler{
+				WorkFunc: controllerpkg.HandleOwnedResourceNamespacedFunc(
+					log, queue,
+					certificatesv1.SchemeGroupVersion.WithKind("CertificateSigningRequest"),
+					func(_, name string) (interface{}, error) {
+						return csrLister.Get(name)
+					},
+				),
+			})
+			return []cache.InformerSynced{orderInformer.HasSynced}, nil
+		},
+	)
 }
 
-func NewACME(ctx *controllerpkg.Context) *ACME {
+func NewACME(ctx *controllerpkg.Context) certificatesigningrequests.Signer {
 	return &ACME{
 		issuerOptions:            ctx.IssuerOptions,
 		orderLister:              ctx.SharedInformerFactory.Acme().V1().Orders().Lister(),
@@ -84,6 +106,7 @@ func NewACME(ctx *controllerpkg.Context) *ACME {
 		certClient:               ctx.Client.CertificatesV1().CertificateSigningRequests(),
 		recorder:                 ctx.Recorder,
 		copiedAnnotationPrefixes: ctx.CertificateOptions.CopiedAnnotationPrefixes,
+		fieldManager:             ctx.FieldManager,
 	}
 }
 
@@ -104,7 +127,7 @@ func (a *ACME) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningR
 		log.Error(err, message)
 		a.recorder.Event(csr, corev1.EventTypeWarning, "RequestParsingError", message)
 		ctrlutil.CertificateSigningRequestSetFailed(csr, "RequestParsingError", message)
-		_, uerr := a.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+		_, uerr := ctrlutil.UpdateOrApplyStatus(ctx, a.certClient, csr, certificatesv1.CertificateFailed, a.fieldManager)
 		return uerr
 	}
 
@@ -117,7 +140,7 @@ func (a *ACME) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningR
 		log.Error(err, message)
 		a.recorder.Event(csr, corev1.EventTypeWarning, "InvalidOrder", message)
 		ctrlutil.CertificateSigningRequestSetFailed(csr, "InvalidOrder", message)
-		_, uerr := a.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+		_, uerr := ctrlutil.UpdateOrApplyStatus(ctx, a.certClient, csr, certificatesv1.CertificateFailed, a.fieldManager)
 		return uerr
 	}
 
@@ -129,13 +152,13 @@ func (a *ACME) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningR
 		log.Error(err, message)
 		a.recorder.Event(csr, corev1.EventTypeWarning, "OrderBuildingError", message)
 		ctrlutil.CertificateSigningRequestSetFailed(csr, "OrderBuildingError", message)
-		_, uerr := a.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+		_, uerr := ctrlutil.UpdateOrApplyStatus(ctx, a.certClient, csr, certificatesv1.CertificateFailed, a.fieldManager)
 		return uerr
 	}
 
 	order, err := a.orderLister.Orders(expectedOrder.Namespace).Get(expectedOrder.Name)
 	if apierrors.IsNotFound(err) {
-		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(ctx, expectedOrder, metav1.CreateOptions{})
+		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(ctx, expectedOrder, metav1.CreateOptions{FieldManager: a.fieldManager})
 		if err != nil {
 			// Failing to create the order here is most likely network related. We
 			// should backoff and keep trying.
@@ -174,7 +197,7 @@ func (a *ACME) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningR
 
 		a.recorder.Event(csr, corev1.EventTypeWarning, "OrderFailed", message)
 		ctrlutil.CertificateSigningRequestSetFailed(csr, "OrderFailed", message)
-		_, uerr := a.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+		_, uerr := ctrlutil.UpdateOrApplyStatus(ctx, a.certClient, csr, certificatesv1.CertificateFailed, a.fieldManager)
 		return uerr
 	}
 
@@ -215,7 +238,7 @@ func (a *ACME) Sign(ctx context.Context, csr *certificatesv1.CertificateSigningR
 	}
 
 	csr.Status.Certificate = order.Status.Certificate
-	csr, err = a.certClient.UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+	csr, err = ctrlutil.UpdateOrApplyStatus(ctx, a.certClient, csr, "", a.fieldManager)
 	if err != nil {
 		message := "Error updating certificate"
 		a.recorder.Eventf(csr, corev1.EventTypeWarning, "SigningError", "%s: %s", message, err)
@@ -265,6 +288,9 @@ func (a *ACME) buildOrder(csr *certificatesv1.CertificateSigningRequest, req *x5
 	if iss.GetSpec().ACME.EnableDurationFeature {
 		duration, err := pki.DurationFromCertificateSigningRequest(csr)
 		if err != nil {
+			// This should never happen as caller would have errored
+			// before calling the ACME signer if the duration was
+			// invalid.
 			return nil, err
 		}
 		spec.Duration = &metav1.Duration{Duration: duration}

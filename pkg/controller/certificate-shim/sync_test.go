@@ -30,15 +30,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	coretesting "k8s.io/client-go/testing"
-	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha1"
+	"k8s.io/utils/pointer"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 func Test_hasShimAnnotation(t *testing.T) {
@@ -788,6 +789,360 @@ func TestSync(t *testing.T) {
 			},
 		},
 		{
+			Name:         "should update an existing Certificate resource with different revision limit if it does not match specified on the IngressLike",
+			Issuer:       acmeIssuer,
+			IssuerLister: []runtime.Object{acmeIssuerNewFormat},
+			IngressLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-name",
+					Namespace: gen.DefaultTestNamespace,
+					Annotations: map[string]string{
+						cmapi.IngressIssuerNameAnnotationKey:    "issuer-name",
+						cmapi.RevisionHistoryLimitAnnotationKey: "1",
+					},
+					UID: types.UID("ingress-name"),
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{
+						{
+							Hosts:      []string{"example.com"},
+							SecretName: "cert-secret-name",
+						},
+					},
+				},
+			},
+			DefaultIssuerKind: "Issuer",
+			CertificateLister: []runtime.Object{
+				&cmapi.Certificate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages:               cmapi.DefaultKeyUsages(),
+						RevisionHistoryLimit: pointer.Int32(7),
+					},
+				},
+			},
+			ExpectedEvents: []string{`Normal UpdateCertificate Successfully updated Certificate "cert-secret-name"`},
+			ExpectedUpdate: []*cmapi.Certificate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages:               cmapi.DefaultKeyUsages(),
+						RevisionHistoryLimit: pointer.Int32(1),
+					},
+				},
+			},
+		},
+		{
+			Name:         "should update an existing Certificate resource with different rsa private key size if it does not match specified on the IngressLike",
+			Issuer:       acmeIssuer,
+			IssuerLister: []runtime.Object{acmeIssuerNewFormat},
+			IngressLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-name",
+					Namespace: gen.DefaultTestNamespace,
+					Annotations: map[string]string{
+						cmapi.IngressIssuerNameAnnotationKey:   "issuer-name",
+						cmapi.PrivateKeyAlgorithmAnnotationKey: "RSA",
+						cmapi.PrivateKeySizeAnnotationKey:      "4096",
+					},
+					UID: types.UID("ingress-name"),
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{
+						{
+							Hosts:      []string{"example.com"},
+							SecretName: "cert-secret-name",
+						},
+					},
+				},
+			},
+			DefaultIssuerKind: "Issuer",
+			CertificateLister: []runtime.Object{
+				&cmapi.Certificate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.RSAKeyAlgorithm,
+							Size:      2048,
+						},
+					},
+				},
+			},
+			ExpectedEvents: []string{`Normal UpdateCertificate Successfully updated Certificate "cert-secret-name"`},
+			ExpectedUpdate: []*cmapi.Certificate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.RSAKeyAlgorithm,
+							Size:      4096,
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:         "should update an existing Certificate resource with different ecdsa private key size if it does not match specified on the IngressLike",
+			Issuer:       acmeIssuer,
+			IssuerLister: []runtime.Object{acmeIssuerNewFormat},
+			IngressLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-name",
+					Namespace: gen.DefaultTestNamespace,
+					Annotations: map[string]string{
+						cmapi.IngressIssuerNameAnnotationKey:   "issuer-name",
+						cmapi.PrivateKeyAlgorithmAnnotationKey: "ECDSA",
+						cmapi.PrivateKeySizeAnnotationKey:      "384",
+					},
+					UID: types.UID("ingress-name"),
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{
+						{
+							Hosts:      []string{"example.com"},
+							SecretName: "cert-secret-name",
+						},
+					},
+				},
+			},
+			DefaultIssuerKind: "Issuer",
+			CertificateLister: []runtime.Object{
+				&cmapi.Certificate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.ECDSAKeyAlgorithm,
+							Size:      256,
+						},
+					},
+				},
+			},
+			ExpectedEvents: []string{`Normal UpdateCertificate Successfully updated Certificate "cert-secret-name"`},
+			ExpectedUpdate: []*cmapi.Certificate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.ECDSAKeyAlgorithm,
+							Size:      384,
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:         "should update an existing Certificate resource with different private key encoding if it does not match specified on the IngressLike",
+			Issuer:       acmeIssuer,
+			IssuerLister: []runtime.Object{acmeIssuerNewFormat},
+			IngressLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-name",
+					Namespace: gen.DefaultTestNamespace,
+					Annotations: map[string]string{
+						cmapi.IngressIssuerNameAnnotationKey:   "issuer-name",
+						cmapi.PrivateKeyAlgorithmAnnotationKey: "ECDSA",
+						cmapi.PrivateKeyEncodingAnnotationKey:  "PKCS8",
+						cmapi.PrivateKeySizeAnnotationKey:      "384",
+					},
+					UID: types.UID("ingress-name"),
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{
+						{
+							Hosts:      []string{"example.com"},
+							SecretName: "cert-secret-name",
+						},
+					},
+				},
+			},
+			DefaultIssuerKind: "Issuer",
+			CertificateLister: []runtime.Object{
+				&cmapi.Certificate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.ECDSAKeyAlgorithm,
+							Size:      384,
+						},
+					},
+				},
+			},
+			ExpectedEvents: []string{`Normal UpdateCertificate Successfully updated Certificate "cert-secret-name"`},
+			ExpectedUpdate: []*cmapi.Certificate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.ECDSAKeyAlgorithm,
+							Encoding:  cmapi.PKCS8,
+							Size:      384,
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:         "should update an existing Certificate resource with different private key rotation policy if it does not match specified on the IngressLike",
+			Issuer:       acmeIssuer,
+			IssuerLister: []runtime.Object{acmeIssuerNewFormat},
+			IngressLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-name",
+					Namespace: gen.DefaultTestNamespace,
+					Annotations: map[string]string{
+						cmapi.IngressIssuerNameAnnotationKey:        "issuer-name",
+						cmapi.PrivateKeyAlgorithmAnnotationKey:      "ECDSA",
+						cmapi.PrivateKeyEncodingAnnotationKey:       "PKCS1",
+						cmapi.PrivateKeySizeAnnotationKey:           "384",
+						cmapi.PrivateKeyRotationPolicyAnnotationKey: "Always",
+					},
+					UID: types.UID("ingress-name"),
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{
+						{
+							Hosts:      []string{"example.com"},
+							SecretName: "cert-secret-name",
+						},
+					},
+				},
+			},
+			DefaultIssuerKind: "Issuer",
+			CertificateLister: []runtime.Object{
+				&cmapi.Certificate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm: cmapi.ECDSAKeyAlgorithm,
+							Size:      384,
+						},
+					},
+				},
+			},
+			ExpectedEvents: []string{`Normal UpdateCertificate Successfully updated Certificate "cert-secret-name"`},
+			ExpectedUpdate: []*cmapi.Certificate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "cert-secret-name",
+						Namespace:       gen.DefaultTestNamespace,
+						OwnerReferences: buildIngressOwnerReferences("ingress-name", gen.DefaultTestNamespace),
+					},
+					Spec: cmapi.CertificateSpec{
+						DNSNames:   []string{"example.com"},
+						SecretName: "cert-secret-name",
+						IssuerRef: cmmeta.ObjectReference{
+							Name: "issuer-name",
+							Kind: "Issuer",
+						},
+						Usages: cmapi.DefaultKeyUsages(),
+						PrivateKey: &cmapi.CertificatePrivateKey{
+							Algorithm:      cmapi.ECDSAKeyAlgorithm,
+							Encoding:       cmapi.PKCS1,
+							Size:           384,
+							RotationPolicy: cmapi.RotationPolicyAlways,
+						},
+					},
+				},
+			},
+		},
+		{
 			Name:         "should not update certificate if it does not belong to any ingress",
 			Issuer:       acmeIssuer,
 			IssuerLister: []runtime.Object{acmeIssuer},
@@ -1027,10 +1382,15 @@ func TestSync(t *testing.T) {
 					Name:      "ingress-name",
 					Namespace: gen.DefaultTestNamespace,
 					Annotations: map[string]string{
-						cmapi.IngressIssuerNameAnnotationKey: "issuer-name",
-						cmapi.IssuerKindAnnotationKey:        "Issuer",
-						cmapi.IssuerGroupAnnotationKey:       "cert-manager.io",
-						cmapi.RenewBeforeAnnotationKey:       "invalid renew before value",
+						cmapi.IngressIssuerNameAnnotationKey:        "issuer-name",
+						cmapi.IssuerKindAnnotationKey:               "Issuer",
+						cmapi.IssuerGroupAnnotationKey:              "cert-manager.io",
+						cmapi.RenewBeforeAnnotationKey:              "invalid renew before value",
+						cmapi.RevisionHistoryLimitAnnotationKey:     "invalid revision history limit value",
+						cmapi.PrivateKeyAlgorithmAnnotationKey:      "invalid private key algorithm value",
+						cmapi.PrivateKeyEncodingAnnotationKey:       "invalid private key encoding value",
+						cmapi.PrivateKeySizeAnnotationKey:           "invalid private key size value",
+						cmapi.PrivateKeyRotationPolicyAnnotationKey: "invalid private key rotation policy value",
 					},
 					UID: types.UID("ingress-name"),
 				},
@@ -1128,10 +1488,12 @@ func TestSync(t *testing.T) {
 							Protocol: "HTTPS",
 							TLS: &gwapi.GatewayTLSConfig{
 								Mode: ptrMode(gwapi.TLSModeTerminate),
-								CertificateRef: &gwapi.LocalObjectReference{
-									Group: "core",
-									Kind:  "Secret",
-									Name:  "example-com-tls",
+								CertificateRefs: []gwapi.SecretObjectReference{
+									{
+										Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+										Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+										Name:  "example-com-tls",
+									},
 								},
 							},
 						},
@@ -1187,10 +1549,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1248,10 +1612,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1305,10 +1671,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1356,10 +1724,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1408,10 +1778,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1463,10 +1835,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1513,10 +1887,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1567,10 +1943,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1602,10 +1980,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}, {
@@ -1614,10 +1994,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls-invalid",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1647,7 +2029,7 @@ func TestSync(t *testing.T) {
 			Issuer:       acmeIssuer,
 			IssuerLister: []runtime.Object{acmeIssuer},
 			ExpectedEvents: []string{
-				`Warning BadConfig Skipped a listener block: spec.listeners[0].tls.certificateRef: Required value: listener is missing a certificateRef`,
+				`Warning BadConfig Skipped a listener block: spec.listeners[0].tls.certificateRef: Required value: listener has no certificateRefs`,
 				`Normal CreateCertificate Successfully created Certificate "example-com-tls"`,
 			},
 			IngressLike: &gwapi.Gateway{
@@ -1666,8 +2048,8 @@ func TestSync(t *testing.T) {
 						Port:     443,
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
-							Mode:           ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: nil, // 🔥
+							Mode:            ptrMode(gwapi.TLSModeTerminate),
+							CertificateRefs: []gwapi.SecretObjectReference{},
 						},
 					}, {
 						Hostname: ptrHostname("www.example.com"),
@@ -1675,10 +2057,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -1737,10 +2121,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "existing-crt",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "existing-crt",
+								},
 							},
 						},
 					}},
@@ -1789,10 +2175,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "existing-crt",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "existing-crt",
+								},
 							},
 						},
 					}},
@@ -1849,10 +2237,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "cert-secret-name",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "cert-secret-name",
+								},
 							},
 						},
 					}},
@@ -1925,10 +2315,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "existing-crt",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "existing-crt",
+								},
 							},
 						},
 					}},
@@ -1975,10 +2367,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "existing-crt",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "existing-crt",
+								},
 							},
 						},
 					}},
@@ -2055,7 +2449,7 @@ func TestSync(t *testing.T) {
 			},
 		},
 		{
-			Name:         "should update a Certificate if is contains a Common Name that is not defined on the Gateway annotations",
+			Name:         "should update a Certificate if it contains a Common Name that is not defined on the Gateway annotations",
 			Issuer:       acmeIssuer,
 			IssuerLister: []runtime.Object{acmeIssuer},
 			IngressLike: &gwapi.Gateway{
@@ -2077,10 +2471,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -2150,10 +2546,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}, {
@@ -2162,10 +2560,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}, {
@@ -2174,10 +2574,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -2229,10 +2631,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "foo-example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "foo-example-com-tls",
+								},
 							},
 						},
 					}, {
@@ -2241,10 +2645,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "bar-example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "bar-example-com-tls",
+								},
 							},
 						},
 					}},
@@ -2314,10 +2720,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -2350,10 +2758,12 @@ func TestSync(t *testing.T) {
 						Protocol: "HTTPS",
 						TLS: &gwapi.GatewayTLSConfig{
 							Mode: ptrMode(gwapi.TLSModeTerminate),
-							CertificateRef: &gwapi.LocalObjectReference{
-								Group: "core",
-								Kind:  "Secret",
-								Name:  "example-com-tls",
+							CertificateRefs: []gwapi.SecretObjectReference{
+								{
+									Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+									Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+									Name:  "example-com-tls",
+								},
 							},
 						},
 					}},
@@ -2431,12 +2841,12 @@ func TestSync(t *testing.T) {
 			}
 			b.Init()
 			defer b.Stop()
-			sync := SyncFnFor(b.Recorder, logr.DiscardLogger{}, b.CMClient, b.SharedInformerFactory.Certmanager().V1().Certificates().Lister(), controller.IngressShimOptions{
+			sync := SyncFnFor(b.Recorder, logr.Discard(), b.CMClient, b.SharedInformerFactory.Certmanager().V1().Certificates().Lister(), controller.IngressShimOptions{
 				DefaultIssuerName:                 test.DefaultIssuerName,
 				DefaultIssuerKind:                 test.DefaultIssuerKind,
 				DefaultIssuerGroup:                test.DefaultIssuerGroup,
 				DefaultAutoCertificateAnnotations: []string{"kubernetes.io/tls-acme"},
-			})
+			}, "cert-manager-test")
 			b.Start()
 
 			err := sync(context.Background(), test.IngressLike)
@@ -2610,6 +3020,7 @@ func buildIngressOwnerReferences(name, namespace string) []metav1.OwnerReference
 	}
 }
 
+// The Gateway name and UID are set to the same.
 func buildGatewayOwnerReferences(name, namespace string) []metav1.OwnerReference {
 	return []metav1.OwnerReference{
 		*metav1.NewControllerRef(buildIngress(name, namespace, nil), gatewayGVK),
@@ -2648,10 +3059,12 @@ func Test_validateGatewayListenerBlock(t *testing.T) {
 				Protocol: gwapi.HTTPSProtocolType,
 				TLS: &gwapi.GatewayTLSConfig{
 					Mode: ptrMode(gwapi.TLSModeTerminate),
-					CertificateRef: &gwapi.LocalObjectReference{
-						Group: "core",
-						Kind:  "Secret",
-						Name:  "example-com",
+					CertificateRefs: []gwapi.SecretObjectReference{
+						{
+							Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+							Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+							Name:  "example-com",
+						},
 					},
 				},
 			},
@@ -2665,14 +3078,17 @@ func Test_validateGatewayListenerBlock(t *testing.T) {
 				Protocol: gwapi.HTTPSProtocolType,
 				TLS: &gwapi.GatewayTLSConfig{
 					Mode: ptrMode(gwapi.TLSModeTerminate),
-					CertificateRef: &gwapi.LocalObjectReference{
-						Group: "",
-						Kind:  "Secret",
-						Name:  "example-com",
+					CertificateRefs: []gwapi.SecretObjectReference{
+						{
+							Group: func() *gwapi.Group { g := gwapi.Group(""); return &g }(),
+							Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+							Name:  "example-com",
+						},
 					},
 				},
 			},
-			wantErr: "spec.listeners[0].tls.certificateRef.group: Unsupported value: \"\": supported values: \"core\"",
+			// no group is now supported
+			wantErr: "",
 		},
 		{
 			name: "unsupported group",
@@ -2682,14 +3098,16 @@ func Test_validateGatewayListenerBlock(t *testing.T) {
 				Protocol: gwapi.HTTPSProtocolType,
 				TLS: &gwapi.GatewayTLSConfig{
 					Mode: ptrMode(gwapi.TLSModeTerminate),
-					CertificateRef: &gwapi.LocalObjectReference{
-						Group: "invalid",
-						Kind:  "Secret",
-						Name:  "example-com",
+					CertificateRefs: []gwapi.SecretObjectReference{
+						{
+							Group: func() *gwapi.Group { g := gwapi.Group("invalid"); return &g }(),
+							Kind:  func() *gwapi.Kind { k := gwapi.Kind("Secret"); return &k }(),
+							Name:  "example-com-tls",
+						},
 					},
 				},
 			},
-			wantErr: "spec.listeners[0].tls.certificateRef.group: Unsupported value: \"invalid\": supported values: \"core\"",
+			wantErr: "spec.listeners[0].tls.certificateRef[0].group: Unsupported value: \"invalid\": supported values: \"core\", \"\"",
 		},
 		{
 			name: "unsupported kind",
@@ -2699,14 +3117,16 @@ func Test_validateGatewayListenerBlock(t *testing.T) {
 				Protocol: gwapi.HTTPSProtocolType,
 				TLS: &gwapi.GatewayTLSConfig{
 					Mode: ptrMode(gwapi.TLSModeTerminate),
-					CertificateRef: &gwapi.LocalObjectReference{
-						Group: "core",
-						Kind:  "SomeOtherKind",
-						Name:  "example-com",
+					CertificateRefs: []gwapi.SecretObjectReference{
+						{
+							Group: func() *gwapi.Group { g := gwapi.Group("core"); return &g }(),
+							Kind:  func() *gwapi.Kind { k := gwapi.Kind("SomeOtherKind"); return &k }(),
+							Name:  "example-com",
+						},
 					},
 				},
 			},
-			wantErr: "spec.listeners[0].tls.certificateRef.kind: Unsupported value: \"SomeOtherKind\": supported values: \"Secret\"",
+			wantErr: "spec.listeners[0].tls.certificateRef[0].kind: Unsupported value: \"SomeOtherKind\": supported values: \"Secret\", \"\"",
 		},
 	}
 	for _, test := range tests {
@@ -2719,4 +3139,152 @@ func Test_validateGatewayListenerBlock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_findCertificatesToBeRemoved(t *testing.T) {
+	tests := []struct {
+		name            string
+		givenCerts      []*cmapi.Certificate
+		ingLike         metav1.Object
+		wantToBeRemoved []string
+	}{
+		{
+			name: "should not remove Certificate when not owned by the Ingress",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("ingress-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Name: "ingress-2", Namespace: "default", UID: "ingress-2"},
+				Spec:       networkingv1.IngressSpec{TLS: []networkingv1.IngressTLS{{SecretName: "secret-name"}}},
+			},
+			wantToBeRemoved: nil,
+		},
+		{
+			name: "should not remove Certificate when Ingress references the secretName of the Certificate",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("ingress-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Name: "ingress-1", Namespace: "default", UID: "ingress-1"},
+				Spec:       networkingv1.IngressSpec{TLS: []networkingv1.IngressTLS{{SecretName: "secret-name"}}},
+			},
+			wantToBeRemoved: nil,
+		},
+		{
+			name: "should remove Certificate when Ingress does not reference the secretName of the Certificate",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("ingress-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Name: "ingress-1", Namespace: "default", UID: "ingress-1"},
+			},
+			wantToBeRemoved: []string{"cert-1"},
+		},
+		{
+			name: "should not remove Certificate when not owned by the Gateway",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("gw-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &gwapi.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw-2", Namespace: "default", UID: "gw-2"},
+				Spec: gwapi.GatewaySpec{Listeners: []gwapi.Listener{{
+					TLS: &gwapi.GatewayTLSConfig{CertificateRefs: []gwapi.SecretObjectReference{
+						{
+							Name: "secret-name",
+						},
+					}},
+				}}},
+			},
+			wantToBeRemoved: nil,
+		},
+		{
+			name: "should remove Certificate when Gateway does not reference the secretName of the Certificate in one of its listers",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("gw-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &gwapi.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw-1", Namespace: "default", UID: "gw-1"},
+				Spec: gwapi.GatewaySpec{Listeners: []gwapi.Listener{
+					{TLS: &gwapi.GatewayTLSConfig{CertificateRefs: []gwapi.SecretObjectReference{{Name: "not-secret-name"}}}},
+				}},
+			},
+			wantToBeRemoved: []string{"cert-1"},
+		},
+		{
+			name: "should not remove Certificate when the Gateway references the secretName of the Certificate in one of its listers",
+			givenCerts: []*cmapi.Certificate{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "cert-1",
+					Namespace:       "default",
+					OwnerReferences: buildGatewayOwnerReferences("gw-1", "default"),
+				}, Spec: cmapi.CertificateSpec{
+					SecretName: "secret-name",
+				}},
+			},
+			ingLike: &gwapi.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw-1", Namespace: "default", UID: "gw-1"},
+				Spec: gwapi.GatewaySpec{Listeners: []gwapi.Listener{
+					{TLS: &gwapi.GatewayTLSConfig{CertificateRefs: []gwapi.SecretObjectReference{{Name: "secret-name"}}}},
+				}},
+			},
+			wantToBeRemoved: nil,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotCerts := findCertificatesToBeRemoved(test.givenCerts, test.ingLike)
+			assert.Equal(t, test.wantToBeRemoved, gotCerts)
+		})
+	}
+}
+
+func Test_secretNameUsedIn_nilPointerGateway(t *testing.T) {
+	got := secretNameUsedIn("secret-name", &gwapi.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-1", Namespace: "default", UID: "gw-1"},
+		Spec: gwapi.GatewaySpec{Listeners: []gwapi.Listener{
+			{TLS: nil},
+			{TLS: &gwapi.GatewayTLSConfig{CertificateRefs: nil}},
+			{TLS: &gwapi.GatewayTLSConfig{CertificateRefs: []gwapi.SecretObjectReference{{Name: "secret-name"}}}},
+		}},
+	})
+	assert.Equal(t, true, got)
+
+	got = secretNameUsedIn("secret-name", &gwapi.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-1", Namespace: "default", UID: "gw-1"},
+		Spec: gwapi.GatewaySpec{Listeners: []gwapi.Listener{
+			{TLS: nil},
+			{TLS: &gwapi.GatewayTLSConfig{CertificateRefs: nil}},
+		}},
+	})
+	assert.Equal(t, false, got)
 }

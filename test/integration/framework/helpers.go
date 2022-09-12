@@ -17,9 +17,11 @@ limitations under the License.
 package framework
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -31,9 +33,9 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubectl/pkg/util/openapi"
 
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 )
 
 func NewEventRecorder(t *testing.T) record.EventRecorder {
@@ -57,39 +59,54 @@ func NewClients(t *testing.T, config *rest.Config) (kubernetes.Interface, inform
 }
 
 func StartInformersAndController(t *testing.T, factory informers.SharedInformerFactory, cmFactory cminformers.SharedInformerFactory, c controllerpkg.Interface) StopFunc {
+	return StartInformersAndControllers(t, factory, cmFactory, c)
+}
+
+func StartInformersAndControllers(t *testing.T, factory informers.SharedInformerFactory, cmFactory cminformers.SharedInformerFactory, cs ...controllerpkg.Interface) StopFunc {
 	stopCh := make(chan struct{})
+	errCh := make(chan error)
+
+	factory.Start(stopCh)
+	cmFactory.Start(stopCh)
+	group, _ := errgroup.WithContext(context.Background())
 	go func() {
-		factory.Start(stopCh)
-		cmFactory.Start(stopCh)
-		if err := c.Run(1, stopCh); err != nil {
-			t.Fatal(err)
+		defer close(errCh)
+		for _, c := range cs {
+			func(c controllerpkg.Interface) {
+				group.Go(func() error {
+					return c.Run(1, stopCh)
+				})
+			}(c)
 		}
+		errCh <- group.Wait()
 	}()
 	return func() {
 		close(stopCh)
+		err := <-errCh
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func WaitForOpenAPIResourcesToBeLoaded(t *testing.T, config *rest.Config, gvk schema.GroupVersionKind) {
+func WaitForOpenAPIResourcesToBeLoaded(t *testing.T, ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind) {
 	dc, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = wait.PollImmediate(time.Second, 2*time.Minute,
-		func() (bool, error) {
-			og := openapi.NewOpenAPIGetter(dc)
-			oapiResource, err := openapi.NewOpenAPIParser(og).Parse()
-			if err != nil {
-				return false, err
-			}
+	err = wait.PollImmediateUntil(time.Second, func() (bool, error) {
+		og := openapi.NewOpenAPIGetter(dc)
+		oapiResource, err := openapi.NewOpenAPIParser(og).Parse()
+		if err != nil {
+			return false, err
+		}
 
-			if oapiResource.LookupResource(gvk) != nil {
-				return true, nil
-			}
-			return false, nil
-		},
-	)
+		if oapiResource.LookupResource(gvk) != nil {
+			return true, nil
+		}
+		return false, nil
+	}, ctx.Done())
 
 	if err != nil {
 		t.Fatal("Our GVK isn't loaded into the OpenAPI resources API after waiting for 2 minutes", err)
